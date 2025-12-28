@@ -4,8 +4,10 @@ import requests
 import subprocess
 import re
 import platform
+import datetime
 from pydantic import BaseModel
 import sys
+
 # 定义配置模型
 class Config(BaseModel):
     api_url: str = "https://api.example.com/v1/chat/completions"
@@ -21,7 +23,7 @@ class Config(BaseModel):
 
     def save_to_file(self, file_path="config.json"):
         with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(self.dict(), f, indent=4)
+            json.dump(self.dict(), f, indent=4, ensure_ascii=False)
 
     @classmethod
     def load_from_file(cls, file_path="config.json"):
@@ -54,17 +56,21 @@ class AIChatTool:
     def send_message(self, user_message):
         if not user_message:
             return
-        self.call_api(user_message)  # 直接调用 call_api，不再使用线程
+        self.call_api(user_message)
 
     def call_api(self, user_message):
         try:
             system_content = f"你是一个名为{self.config.ai_name}的AI助手，正在与用户{self.config.user_name}对话。"
             system_content += f"\n当前系统类型是：{platform.system()}"
             system_content += "\n你可以使用以下命令格式："
-            system_content += "\n~!run:[cmd:<命令>]!~ 执行命令行命令"
-            system_content += "\n~!run:[shell:<命令>]!~ 执行 Shell 命令"
-            system_content += "\n~!run:[ps:<命令>]!~ 执行 PowerShell 命令"
-            system_content += "\n~!get:[systype]!~ 获取当前系统类型"
+            system_content += "\n;;system@run:cmd(命令);; 执行 CMD 命令"
+            system_content += "\n;;system@run:powershell(命令);; 执行 PowerShell 命令"
+            system_content += "\n;;system@run:shell(命令);; 执行 Shell 命令"
+            system_content += "\n;;system@time:get();; 获取当前日期+时间"
+            system_content += "\n;;system@time:get(date);; 获取当前日期"
+            system_content += "\n;;system@time:get(time);; 获取当前时间"
+            system_content += "\n;;system@time:get(stamp);; 获取当前时间戳"
+            system_content += "\n;;system@info:get();; 获取当前系统类型"
 
             # 如果选择了提示词文件，则读取文件内容并追加到系统提示词
             if self.config.prompt_file != "无":
@@ -104,32 +110,45 @@ class AIChatTool:
 
             if response.status_code == 200:
                 ai_response = response.json().get("choices", [{}])[0].get("message", {}).get("content", "未获取到回复")
-                self.handle_ai_response(ai_response, user_message)  # 传入 user_message
+                self.handle_ai_response(ai_response, user_message)
             else:
                 print(f"{self.config.ai_name}: 错误: {response.text}")
         except Exception as e:
             print(f"{self.config.ai_name}: 请求失败: {str(e)}")
 
     def handle_ai_response(self, ai_response, user_message):
-        # 只打印 AI 的回复，不打印用户消息
-        pattern = r"~!run:\[(cmd|shell|ps):(.+?)\]!~"
+        # 解析新格式的命令
+        pattern = r";;(system)@(run|time|info):(cmd|powershell|shell|get)\(?(.*?)\)?;;"
         matches = re.findall(pattern, ai_response)
 
         if matches:
             for match in matches:
-                command_type = match[0]
-                command = match[1].strip()
-                if self.config.log_commands:
-                    print(f"[日志] 执行命令: {command}")
-                self.run_command(command_type, command)  # 直接调用 run_command，不再使用线程
+                module = match[0]  # 模块名，如 system
+                tool = match[1]    # 工具名，如 run、time、info
+                func = match[2]    # 函数名，如 cmd、powershell、shell、get
+                value = match[3]   # 函数参数，如 "help"、"date" 等
+
+                if module == "system":
+                    if tool == "run":
+                        if func == "cmd":
+                            self.run_command("cmd", value)
+                        elif func == "powershell":
+                            self.run_command("ps", value)
+                        elif func == "shell":
+                            self.run_command("shell", value)
+                    elif tool == "time":
+                        if func == "get":
+                            self.get_time(value)
+                    elif tool == "info":
+                        if func == "get":
+                            self.get_system_info()
         else:
             print(f"{self.config.ai_name}: {ai_response}")
 
-        # 将用户消息和 AI 回复添加到聊天历史中
+        # 保存聊天记录
         self.chat_history.append({"role": "user", "content": user_message})
         self.chat_history.append({"role": "assistant", "content": ai_response})
 
-        # 如果保存历史记录选项被勾选，则将聊天记录保存到文件
         if self.config.save_history:
             self.save_chat_history(user_message, ai_response)
 
@@ -161,6 +180,22 @@ class AIChatTool:
         except Exception as e:
             print(f"命令执行失败: {str(e)}")
 
+    def get_time(self, time_type):
+        now = datetime.datetime.now()
+        if time_type == "date":
+            response = now.strftime("%Y-%m-%d")
+        elif time_type == "time":
+            response = now.strftime("%H:%M:%S")
+        elif time_type == "stamp":
+            response = str(int(now.timestamp()))
+        else:
+            response = now.strftime("%Y-%m-%d %H:%M:%S")
+        self.call_api(response)
+
+    def get_system_info(self):
+        response = f"当前系统类型：{platform.system()}"
+        self.call_api(response)
+
     def save_chat_history(self, user_message, ai_response):
         """将聊天记录保存到文件"""
         history_file = "history.hty"
@@ -185,6 +220,7 @@ class AIChatTool:
 def clear():
     """清空屏幕"""
     os.system('cls' if os.name == 'nt' else 'clear')
+
 # 运行程序
 if __name__ == "__main__":
     clear()
@@ -208,18 +244,18 @@ if __name__ == "__main__":
         elif send_message.strip() == ";;config":
             clear()
             print("""
- ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗ 
-██╔════╝██╔═══██╗████╗  ██║██╔════╝██║██╔════╝ 
+ ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
+██╔════╝██╔═══██╗████╗  ██║██╔════╝██║██╔════╝
 ██║     ██║   ██║██╔██╗ ██║█████╗  ██║██║  ███╗
 ██║     ██║   ██║██║╚██╗██║██╔══╝  ██║██║   ██║
 ╚██████╗╚██████╔╝██║ ╚████║██║     ██║╚██████╔╝
- ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝ 
-                                               
+ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝     ╚═╝ ╚═════╝
+
 """)
             config_mode = True
-            print("输入watch查看当前配置")
+            print("输入 watch 查看当前配置")
             while config_mode:
-                config_input = input("config>")
+                config_input = input("config> ")
                 if config_input.lower() == 'back':
                     clear()
                     print("""
@@ -229,7 +265,6 @@ if __name__ == "__main__":
  ██╔╝    ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║
 ██╔╝     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║
 ╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝
-
 """)
                     print("配置没有重载，建议重启程序以应用更改")
                     config_mode = False
@@ -240,7 +275,7 @@ if __name__ == "__main__":
                         print(f"{key}: {value}")
                 elif config_input.split()[0].lower() == "set":
                     try:
-                        _, key, value = config_input.split()
+                        _, key, value = config_input.split(maxsplit=2)
                         with open('config.json', 'r', encoding='utf-8') as file:
                             data = json.load(file)
                         data[key] = value
@@ -255,7 +290,7 @@ if __name__ == "__main__":
                         print(f"发生错误: {e}")
                 elif config_input.strip() == "exit":
                     clear()
-                    exit()
+                    sys.exit()
                 else:
                     print("未知命令，请输入 'watch' 或 'set <配置项> <值>'")
         else:
