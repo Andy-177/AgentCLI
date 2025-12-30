@@ -117,19 +117,20 @@ class AIChatTool:
             print(f"{self.config.ai_name}: 请求失败: {str(e)}")
 
     def handle_ai_response(self, ai_response, user_message):
-        # 解析新格式的命令
-        pattern = r";;(system)@(run|time|info):(cmd|powershell|shell|get)\(?(.*?)\)?;;"
+        # 解析命令，支持多值
+        pattern = r";;([a-zA-Z]+)@([a-zA-Z]+):([a-zA-Z]+)\((.*?)\);;"
         matches = re.findall(pattern, ai_response)
 
         if matches:
             for match in matches:
-                module = match[0]  # 模块名，如 system
-                tool = match[1]    # 工具名，如 run、time、info
-                func = match[2]    # 函数名，如 cmd、powershell、shell、get
-                value = match[3]   # 函数参数，如 "help"、"date" 等
+                module = match[0]  # 模块名
+                tool = match[1]    # 工具名
+                func = match[2]    # 函数名
+                values = [v.strip() for v in match[3].split(",") if v.strip()]  # 支持多值
 
                 if module == "system":
                     if tool == "run":
+                        value = values[0] if values else ""
                         if func == "cmd":
                             self.run_command("cmd", value)
                         elif func == "powershell":
@@ -137,6 +138,7 @@ class AIChatTool:
                         elif func == "shell":
                             self.run_command("shell", value)
                     elif tool == "time":
+                        value = values[0] if values else ""
                         if func == "get":
                             self.get_time(value)
                     elif tool == "info":
