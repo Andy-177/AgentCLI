@@ -73,7 +73,7 @@ class AIChatTool:
             system_content += "\n;;system@info:get();; 获取当前系统类型"
 
             # 如果选择了提示词文件，则读取文件内容并追加到系统提示词
-            if self.config.prompt_file != "无":
+            if self.config.prompt_file != "None":
                 with open(self.config.prompt_file, "r", encoding="utf-8") as f:
                     prompt_content = f.read()
                 system_content += f"\n{prompt_content}"
