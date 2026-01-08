@@ -46,7 +46,7 @@ class Config(BaseModel):
 # ===================== 新增：MCP类 =====================
 class mcp:
     def __init__(self, chat_method):
-        self.chat_method = chat_method  # 持有AIChatmethod实例的引用
+        self.chat_method = chat_method  # 持有Agent实例的引用
     
     def system_module(self):
         """处理system模块的逻辑"""
@@ -70,7 +70,7 @@ class mcp:
 # ======================================================
 
 # 定义聊天工具类
-class AIChatmethod:
+class Agent:
     def __init__(self):
         self.config = Config.load_from_file()
         self.prompt_files = self.get_prompt_files()
@@ -263,8 +263,8 @@ if __name__ == "__main__":
 ╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝
 """)
 
-    app = AIChatmethod()
-    print("AI Chat method 已启动，输入消息开始对话，输入 ';;exit' 退出。")
+    app = Agent()
+    print("Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
     while True:
         send_message = input(f"{app.config.user_name}: ")
         if send_message.lower() == ';;exit':
@@ -325,3 +325,4 @@ if __name__ == "__main__":
         else:
             user_message = send_message.strip()
             app.send_message(user_message)
+
