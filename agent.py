@@ -4,10 +4,9 @@ import requests
 import subprocess
 import re
 import platform
-import datetime
+import datetime  # 保留基础datetime模块
 from pydantic import BaseModel
 import sys
-from datetime import datetime
 
 # 定义配置模型
 class Config(BaseModel):
@@ -25,7 +24,6 @@ class Config(BaseModel):
 
     def save_to_file(self, file_path="config.json"):
         """保存配置到文件"""
-        # 替换：dict() → model_dump()
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(self.model_dump(), f, indent=4, ensure_ascii=False)
 
@@ -37,7 +35,6 @@ class Config(BaseModel):
         """
         config_errors = []  # 记录配置错误信息
         default_config = cls()
-        # 替换：dict() → model_dump()
         default_dict = default_config.model_dump()
         loaded_data = {}
 
@@ -54,7 +51,7 @@ class Config(BaseModel):
                 raise ValueError("配置文件内容不是有效的JSON对象")
         except json.JSONDecodeError as e:
             # JSON格式错误：备份文件 + 生成默认配置
-            error_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+            error_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = f"config_error_backup_{error_time}.json"
             with open(file_path, "rb") as f_src, open(backup_path, "wb") as f_dst:
                 f_dst.write(f_src.read())
@@ -267,6 +264,7 @@ class mcp:
             
             elif method == "time" and func == "get":
                 time_type = list(params.values())[0] if params else ""
+                # 修复：调用正确的时间获取方法
                 time_value = self.chat_method.get_time_raw(time_type)
                 result = {"time": time_value}
                 return self.build_success_response(parsed["id"], info, result)
@@ -520,7 +518,8 @@ class Agent:
             return "", str(e)
 
     def get_time_raw(self, time_type):
-        """获取时间"""
+        """获取时间（修复核心错误）"""
+        # 修复：使用正确的 datetime 引用方式
         now = datetime.datetime.now()
         if time_type == "date":
             return now.strftime("%Y-%m-%d")
@@ -529,6 +528,7 @@ class Agent:
         elif time_type == "stamp":
             return str(int(now.timestamp()))
         else:
+            # 默认返回完整的日期时间
             return now.strftime("%Y-%m-%d %H:%M:%S")
 
     def get_system_info_raw(self):
@@ -577,7 +577,7 @@ if __name__ == "__main__":
     # 初始化Agent（自动校验并修复配置）
     app = Agent()
     
-    print("Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
+    print("✅ Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
     while True:
         send_message = input(f"{app.config.user_name}: ")
         if send_message.lower() == ';;exit':
@@ -612,11 +612,10 @@ if __name__ == "__main__":
 ██╔╝     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   
 ╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   
 """)
-                    print("已返回对话界面，配置修改需重启程序生效")
+                    print("✅ 已返回对话界面，配置修改需重启程序生效")
                     config_mode = False
                 elif config_input.lower() == 'watch':
                     print("\n当前配置：")
-                    # 替换：dict() → model_dump()
                     config_dict = app.config.model_dump()
                     for key, value in config_dict.items():
                         print(f"  {key}: {value}")
