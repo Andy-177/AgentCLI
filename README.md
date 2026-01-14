@@ -12,7 +12,7 @@ requests库
 pip install requests
 ```
 # 更新日志
-## 1.0.0
+## Release-1.0.0
 - ## 更新
   - 1.彻底修改mcp协议，抛弃了原来的cmcp协议，改用更标准的mcp协议
   - 2.可以自动修改错误的配置项，config不会允许用户将配置项修改错误
