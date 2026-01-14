@@ -7,6 +7,8 @@ import platform
 import datetime  # 保留基础datetime模块
 from pydantic import BaseModel
 import sys
+import io
+import contextlib
 
 # 定义配置模型
 class Config(BaseModel):
@@ -214,6 +216,8 @@ class mcp:
         module = parsed["module"]
         if module == "system":
             response = self.handle_system_module(parsed)
+        elif module == "python":
+            response = self.handle_python_module(parsed)
         else:
             response = self.build_error_response(
                 parsed["id"],
@@ -250,10 +254,11 @@ class mcp:
         }
         
         try:
-            if method == "run" and func in ["cmd", "powershell", "shell"]:
+            # 将run方法改为terminal，统一用run函数执行终端命令
+            if method == "terminal" and func == "run":
                 for cmd_key, cmd_value in params.items():
                     if cmd_value.strip():
-                        output, error = self.chat_method.run_command_raw(func, cmd_value)
+                        output, error = self.chat_method.run_terminal_command(cmd_value)
                         if error:
                             result[cmd_key] = f"错误: {error}"
                         elif output:
@@ -264,7 +269,6 @@ class mcp:
             
             elif method == "time" and func == "get":
                 time_type = list(params.values())[0] if params else ""
-                # 修复：调用正确的时间获取方法
                 time_value = self.chat_method.get_time_raw(time_type)
                 result = {"time": time_value}
                 return self.build_success_response(parsed["id"], info, result)
@@ -288,6 +292,75 @@ class mcp:
                 info,
                 1004,
                 f"执行命令失败: {str(e)}"
+            )
+    
+    def handle_python_module(self, parsed):
+        """处理python模块的MCP请求"""
+        method = parsed["method"]
+        func = parsed["func"]
+        full_method = parsed["full_method"]
+        params = parsed["params"]
+        result = {}
+        
+        info = {
+            "module": parsed["module"],
+            "method": full_method,
+            "params": params
+        }
+        
+        try:
+            # Python模块只支持run.execute方法
+            if method == "run" and func == "execute":
+                # 遍历参数执行Python代码
+                for param_key, param_value in params.items():
+                    if param_key == "command":
+                        # 单行Python命令
+                        if not isinstance(param_value, str):
+                            result[param_key] = f"错误: command必须是字符串类型，当前类型: {type(param_value).__name__}"
+                            continue
+                        # 执行单行Python代码
+                        exec_result, exec_error = self.chat_method.run_python_command(param_value)
+                        if exec_error:
+                            result[param_key] = f"执行错误: {exec_error}"
+                        else:
+                            result[param_key] = exec_result if exec_result is not None else "执行成功（无返回值）"
+                    
+                    elif param_key == "script":
+                        # 多行Python脚本（列表形式）
+                        if not isinstance(param_value, list):
+                            result[param_key] = f"错误: script必须是列表类型，当前类型: {type(param_value).__name__}"
+                            continue
+                        # 检查列表元素是否都是字符串
+                        if not all(isinstance(line, str) for line in param_value):
+                            result[param_key] = "错误: script列表中的所有元素必须是字符串类型"
+                            continue
+                        # 执行多行Python脚本
+                        exec_result, exec_error = self.chat_method.run_python_script(param_value)
+                        if exec_error:
+                            result[param_key] = f"执行错误: {exec_error}"
+                        else:
+                            result[param_key] = exec_result if exec_result else "脚本执行成功（无输出）"
+                    
+                    else:
+                        # 未知参数键
+                        result[param_key] = f"错误: 不支持的参数键 '{param_key}'，仅支持 command/script"
+                
+                return self.build_success_response(parsed["id"], info, result)
+            
+            else:
+                return self.build_error_response(
+                    parsed["id"],
+                    info,
+                    2001,
+                    f"Python模块未知的方法/函数组合: {method}.{func}，仅支持 run.execute"
+                )
+        
+        except Exception as e:
+            return self.build_error_response(
+                parsed["id"],
+                info,
+                2002,
+                f"执行Python代码失败: {str(e)}"
             )
     
     def build_success_response(self, req_id, info, result):
@@ -398,11 +471,13 @@ class Agent:
             system_content = f"你是一个名为{self.config.ai_name}的AI助手，正在与用户{self.config.user_name}对话。"
             system_content += f"\n当前系统类型是：{platform.system()}"
             system_content += "\n你只能使用MCP协议格式进行操作，格式如下："
-            system_content += "\n;;{\"mcp\":\"request\",\"id\":\"001\",\"module\":\"system\",\"method\":\"run.shell\",\"params\":{\"command1\":\"echo hello\",\"command2\":\"echo world\"}};;"
-            system_content += "\n支持的MCP操作："
-            system_content += "\n1. 执行命令：module=system, method=run.cmd/run.powershell/run.shell, params={命令键: 命令值}"
-            system_content += "\n2. 获取时间：module=system, method=time.get, params={type: date/time/stamp/(空)}"
-            system_content += "\n3. 获取系统信息：module=system, method=info.get, params={}"
+            system_content += "\n1. 执行终端命令："
+            system_content += "\n;;{\"mcp\":\"request\",\"id\":\"001\",\"module\":\"system\",\"method\":\"terminal.run\",\"params\":{\"command1\":\"echo hello\",\"command2\":\"echo world\"}};;"
+            system_content += "\n2. 执行Python代码："
+            system_content += "\n- 单行命令：;;{\"mcp\":\"request\",\"id\":\"002\",\"module\":\"python\",\"method\":\"run.execute\",\"params\":{\"command\":\"print('hello')\"}};;"
+            system_content += "\n- 多行脚本：;;{\"mcp\":\"request\",\"id\":\"003\",\"module\":\"python\",\"method\":\"run.execute\",\"params\":{\"script\":[\"print('hello')\",\"print('world')\",\"x=1+1\",\"print(x)\"]}};;"
+            system_content += "\n3. 获取时间：;;{\"mcp\":\"request\",\"id\":\"004\",\"module\":\"system\",\"method\":\"time.get\",\"params\":{\"type\":\"date\"}};;"
+            system_content += "\n4. 获取系统信息：;;{\"mcp\":\"request\",\"id\":\"005\",\"module\":\"system\",\"method\":\"info.get\",\"params\":{}};;"
             system_content += "\n注意：收到MCP响应后，不需要再次生成MCP请求，直接用自然语言回复用户即可"
 
             if self.config.prompt_file != "None":
@@ -466,35 +541,36 @@ class Agent:
             if self.config.save_history:
                 self.save_chat_history(user_message, ai_response)
 
-    def run_command_raw(self, command_type, command):
-        """执行命令并返回输出和错误信息"""
+    def run_terminal_command(self, command):
+        """统一执行终端命令（移除powershell，仅保留通用shell）"""
         try:
             original_command = command
-            if platform.system() == "Windows":
-                if command_type == "shell":
-                    command_type = "cmd"
+            os_type = platform.system()
+            
+            # 平台适配
+            if os_type == "Windows":
+                # Windows下使用cmd.exe执行
                 if command.startswith("start "):
                     command = f"start /b {command[6:]}"
-            elif platform.system() == "Linux" or platform.system() == "Darwin":
-                if command_type == "cmd":
-                    command_type = "shell"
+            elif os_type in ["Linux", "Darwin"]:
+                # Linux/macOS下使用系统默认shell执行
                 if not command.endswith("&"):
                     command = f"{command} &"
 
             # 打印要执行的命令日志
             logger_mode = self.config.logger
             if logger_mode in ["all", "format"] and self.config.log_commands:
-                print(f"[日志] 执行命令({command_type}): {original_command}")
+                print(f"[日志] 执行终端命令: {original_command}")
 
-            # 执行命令
-            if command_type == "cmd":
-                result = subprocess.run(command, shell=True, text=True, capture_output=True)
-            elif command_type == "shell":
-                result = subprocess.run(command, shell=True, text=True, capture_output=True)
-            elif command_type == "powershell":
-                result = subprocess.run(["powershell", "-Command", command], text=True, capture_output=True)
-            else:
-                return "", f"未知命令类型: {command_type}"
+            # 执行命令（统一使用shell=True）
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                text=True, 
+                capture_output=True,
+                encoding='utf-8',
+                errors='ignore'
+            )
 
             output = result.stdout.strip()
             error = result.stderr.strip()
@@ -503,11 +579,11 @@ class Agent:
             if logger_mode in ["all", "format"] and self.config.log_commands:
                 if logger_mode == "all":
                     if output:
-                        print(f"[日志] 命令({command_type})输出: {output}")
+                        print(f"[日志] 命令输出: {output}")
                     if error:
-                        print(f"[日志] 命令({command_type})错误: {error}")
+                        print(f"[日志] 命令错误: {error}")
                 elif logger_mode == "format":
-                    print(f"[日志] 命令({command_type})执行结果:")
+                    print(f"[日志] 终端命令执行结果:")
                     if output:
                         print(f"  输出: {output}")
                     if error:
@@ -516,10 +592,93 @@ class Agent:
             return output, error
         except Exception as e:
             return "", str(e)
+    
+    def run_python_command(self, command):
+        """执行单行Python命令"""
+        try:
+            # 打印Python命令执行日志
+            logger_mode = self.config.logger
+            if logger_mode in ["all", "format"] and self.config.log_commands:
+                print(f"[日志] 执行Python命令: {command}")
+            
+            # 捕获标准输出
+            output_buffer = io.StringIO()
+            with contextlib.redirect_stdout(output_buffer):
+                try:
+                    # 先尝试用eval执行（有返回值的表达式）
+                    result = eval(command)
+                    output = output_buffer.getvalue().strip()
+                    # 如果有stdout输出，返回输出+返回值；否则只返回返回值
+                    if output:
+                        final_result = f"{output}\n返回值: {result}"
+                    else:
+                        final_result = result
+                except SyntaxError:
+                    # eval执行失败，用exec执行（无返回值的语句）
+                    exec(command)
+                    final_result = output_buffer.getvalue().strip()
+                except:
+                    # 其他错误，再次尝试exec
+                    exec(command)
+                    final_result = output_buffer.getvalue().strip()
+            
+            # 打印执行结果日志
+            if logger_mode in ["all", "format"] and self.config.log_commands:
+                if logger_mode == "all":
+                    print(f"[日志] Python命令执行结果: {final_result if final_result else '无输出'}")
+                elif logger_mode == "format":
+                    print(f"[日志] Python命令执行结果:")
+                    print(f"  输出: {final_result if final_result else '无输出'}")
+            
+            return final_result, ""
+        
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            # 打印错误日志
+            if logger_mode in ["all", "format"] and self.config.log_commands:
+                print(f"[日志] Python命令执行错误: {error_msg}")
+            return None, error_msg
+    
+    def run_python_script(self, script_lines):
+        """执行多行Python脚本（从列表还原为脚本）"""
+        try:
+            # 将列表还原为完整的Python脚本
+            script = "\n".join(script_lines)
+            
+            # 打印Python脚本执行日志
+            logger_mode = self.config.logger
+            if logger_mode in ["all", "format"] and self.config.log_commands:
+                print(f"[日志] 执行Python脚本:")
+                print(f"  脚本内容:")
+                for i, line in enumerate(script_lines, 1):
+                    print(f"    {i}: {line}")
+            
+            # 捕获标准输出
+            output_buffer = io.StringIO()
+            with contextlib.redirect_stdout(output_buffer):
+                exec(script)
+            
+            final_result = output_buffer.getvalue().strip()
+            
+            # 打印执行结果日志
+            if logger_mode in ["all", "format"] and self.config.log_commands:
+                if logger_mode == "all":
+                    print(f"[日志] Python脚本执行结果: {final_result if final_result else '无输出'}")
+                elif logger_mode == "format":
+                    print(f"[日志] Python脚本执行结果:")
+                    print(f"  输出: {final_result if final_result else '无输出'}")
+            
+            return final_result, ""
+        
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            # 打印错误日志
+            if logger_mode in ["all", "format"] and self.config.log_commands:
+                print(f"[日志] Python脚本执行错误: {error_msg}")
+            return None, error_msg
 
     def get_time_raw(self, time_type):
-        """获取时间（修复核心错误）"""
-        # 修复：使用正确的 datetime 引用方式
+        """获取时间"""
         now = datetime.datetime.now()
         if time_type == "date":
             return now.strftime("%Y-%m-%d")
@@ -533,7 +692,7 @@ class Agent:
 
     def get_system_info_raw(self):
         """获取系统信息"""
-        return f"{platform.system()}"
+        return f"{platform.system()} {platform.release()}"
 
     def save_chat_history(self, user_message, ai_response):
         """保存聊天记录"""
@@ -578,6 +737,14 @@ if __name__ == "__main__":
     app = Agent()
     
     print("✅ Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
+    print("📚 支持的MCP操作：")
+    print("   - 终端命令：system.terminal.run")
+    print("   - Python单行命令：python.run.execute (command参数)")
+    print("   - Python多行脚本：python.run.execute (script参数，列表形式)")
+    print("   - 时间查询：system.time.get")
+    print("   - 系统信息：system.info.get")
+    print()
+    
     while True:
         send_message = input(f"{app.config.user_name}: ")
         if send_message.lower() == ';;exit':
