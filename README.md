@@ -17,6 +17,7 @@ pip install requests
   - 1.把system模块里的run方法改为terminal，cmd和shell合并为run函数
   - 2.彻底抛弃powershell
   - 3.添加python模块，允许Agent执行python代码
+  - 4.删除了log_commands配置，改为logger里的lite选项
 - ## 未来
   - [ ] 允许自己编写mcp模块
   - [ ] 将powershell做成mcp模块，让有需求的用户可以使用
