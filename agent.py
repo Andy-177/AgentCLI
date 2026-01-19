@@ -244,12 +244,12 @@ class Agent:
             system_content += f"\n当前系统类型是：{platform.system()}"
             system_content += "\n你只能使用MCP协议格式进行操作，格式如下："
             system_content += "\n1. 执行终端命令："
-            system_content += "\n;;{\"mcp\":\"request\",\"id\":\"001\",\"module\":\"system\",\"method\":\"terminal.run\",\"params\":{\"command1\":\"echo hello\",\"command2\":\"echo world\"}};;"
+            system_content += "\n;;{\"mcp\":\"request\",\"method\":\"system.terminal.run\",\"params\":{\"command\":\"echo hello\"}};;"  # 修改此处示例
             system_content += "\n2. 执行Python代码："
-            system_content += "\n- 单行命令：;;{\"mcp\":\"request\",\"id\":\"002\",\"module\":\"python\",\"method\":\"run.execute\",\"params\":{\"command\":\"print('hello')\"}};;"
-            system_content += "\n- 多行脚本：;;{\"mcp\":\"request\",\"id\":\"003\",\"module\":\"python\",\"method\":\"run.execute\",\"params\":{\"script\":[\"print('hello')\",\"print('world')\",\"x=1+1\",\"print(x)\"]}};;"
-            system_content += "\n3. 获取时间：;;{\"mcp\":\"request\",\"id\":\"004\",\"module\":\"system\",\"method\":\"time.get\",\"params\":{\"type\":\"date\"}};;"
-            system_content += "\n4. 获取系统信息：;;{\"mcp\":\"request\",\"id\":\"005\",\"module\":\"system\",\"method\":\"info.get\",\"params\":{}};;"
+            system_content += "\n- 单行命令：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"command\":\"print('hello')\"}};;"
+            system_content += "\n- 多行脚本：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"script\":[\"print('hello')\",\"print('world')\",\"x=1+1\",\"print(x)\"]}};;"
+            system_content += "\n3. 获取时间：;;{\"mcp\":\"request\",\"method\":\"system.time.get\",\"params\":{\"type\":\"date\"}};;"
+            system_content += "\n4. 获取系统信息：;;{\"mcp\":\"request\",\"method\":\"system.info.get\",\"params\":{}};;"
             system_content += "\n注意：收到MCP响应后，不需要再次生成MCP请求，直接用自然语言回复用户即可"
 
             if self.config.prompt_file != "None":
@@ -316,18 +316,21 @@ class Agent:
 
     # ===================== MCP协议处理方法（原mcp类的方法） =====================
     def parse_mcp_request(self, mcp_json):
-        """解析MCP请求JSON"""
+        """解析MCP请求JSON（解析三级method格式：module.method.func）"""
         try:
-            method_parts = mcp_json.get("method", "").split(".")
-            method_name = method_parts[0] if len(method_parts) > 0 else ""
-            func_name = method_parts[1] if len(method_parts) > 1 else ""
+            full_method = mcp_json.get("method", "")
+            method_parts = full_method.split(".")
+            
+            # 解析三级结构：module.method.func
+            module = method_parts[0] if len(method_parts) > 0 else ""
+            method = method_parts[1] if len(method_parts) > 1 else ""
+            func = method_parts[2] if len(method_parts) > 2 else ""
             
             return {
-                "id": mcp_json.get("id", ""),
-                "module": mcp_json.get("module", ""),
-                "method": method_name,
-                "func": func_name,
-                "full_method": mcp_json.get("method", ""),
+                "module": module,
+                "method": method,
+                "func": func,
+                "full_method": full_method,
                 "params": mcp_json.get("params", {})
             }
         except Exception as e:
@@ -347,8 +350,7 @@ class Agent:
         parsed = self.parse_mcp_request(mcp_json)
         if "error" in parsed:
             response = self.build_error_response(
-                mcp_json.get("id", "unknown"),
-                {"module": "system", "method": "parse.error", "params": {}},
+                {"method": parsed.get("full_method", ""), "params": parsed.get("params", {})},
                 1001,
                 parsed["error"]
             )
@@ -372,8 +374,7 @@ class Agent:
             response = self.handle_python_module(parsed)
         else:
             response = self.build_error_response(
-                parsed["id"],
-                {"module": module, "method": parsed.get("full_method", ""), "params": parsed.get("params", {})},
+                {"method": parsed.get("full_method", ""), "params": parsed.get("params", {})},
                 1002,
                 f"未知模块: {module}"
             )
@@ -394,6 +395,7 @@ class Agent:
     
     def handle_system_module(self, parsed):
         """处理system模块的MCP请求"""
+        module = parsed["module"]
         method = parsed["method"]
         func = parsed["func"]
         full_method = parsed["full_method"]
@@ -401,47 +403,51 @@ class Agent:
         result = {}
         
         info = {
-            "module": parsed["module"],
             "method": full_method,
             "params": params
         }
         
         try:
-            # 将run方法改为terminal，统一用run函数执行终端命令
+            # system模块支持的方法：terminal.run, time.get, info.get
             if method == "terminal" and func == "run":
-                for cmd_key, cmd_value in params.items():
+                # 修改：只处理command键名，不再遍历所有key
+                if "command" in params:
+                    cmd_value = params["command"]
                     if cmd_value.strip():
                         output, error = self.run_terminal_command(cmd_value)
                         if error:
-                            result[cmd_key] = f"错误: {error}"
+                            result["command"] = f"错误: {error}"
                         elif output:
-                            result[cmd_key] = output.strip()
+                            result["command"] = output.strip()
                         else:
-                            result[cmd_key] = "命令执行成功（无输出）"
-                return self.build_success_response(parsed["id"], info, result)
+                            result["command"] = "命令执行成功（无输出）"
+                    else:
+                        result["command"] = "错误: 命令内容不能为空"
+                else:
+                    # 没有command键的错误提示
+                    result["error"] = "参数错误：必须提供'command'键来指定要执行的终端命令"
+                return self.build_success_response(info, result)
             
             elif method == "time" and func == "get":
                 time_type = list(params.values())[0] if params else ""
                 time_value = self.get_time_raw(time_type)
                 result = {"time": time_value}
-                return self.build_success_response(parsed["id"], info, result)
+                return self.build_success_response(info, result)
             
             elif method == "info" and func == "get":
                 info_value = self.get_system_info_raw()
                 result = {"system_info": info_value}
-                return self.build_success_response(parsed["id"], info, result)
+                return self.build_success_response(info, result)
             
             else:
                 return self.build_error_response(
-                    parsed["id"],
                     info,
                     1003,
-                    f"未知的方法/函数组合: {method}.{func}"
+                    f"未知的方法组合: {full_method}，system模块仅支持 terminal.run / time.get / info.get"
                 )
         
         except Exception as e:
             return self.build_error_response(
-                parsed["id"],
                 info,
                 1004,
                 f"执行命令失败: {str(e)}"
@@ -449,6 +455,7 @@ class Agent:
     
     def handle_python_module(self, parsed):
         """处理python模块的MCP请求"""
+        module = parsed["module"]
         method = parsed["method"]
         func = parsed["func"]
         full_method = parsed["full_method"]
@@ -456,7 +463,6 @@ class Agent:
         result = {}
         
         info = {
-            "module": parsed["module"],
             "method": full_method,
             "params": params
         }
@@ -498,39 +504,35 @@ class Agent:
                         # 未知参数键
                         result[param_key] = f"错误: 不支持的参数键 '{param_key}'，仅支持 command/script"
                 
-                return self.build_success_response(parsed["id"], info, result)
+                return self.build_success_response(info, result)
             
             else:
                 return self.build_error_response(
-                    parsed["id"],
                     info,
                     2001,
-                    f"Python模块未知的方法/函数组合: {method}.{func}，仅支持 run.execute"
+                    f"Python模块未知的方法组合: {full_method}，仅支持 run.execute"
                 )
         
         except Exception as e:
             return self.build_error_response(
-                parsed["id"],
                 info,
                 2002,
                 f"执行Python代码失败: {str(e)}"
             )
     
-    def build_success_response(self, req_id, info, result):
+    def build_success_response(self, info, result):
         """构建成功的MCP响应"""
         response = {
             "mcp": "response",
-            "id": req_id,
             "info": info,
             "result": result
         }
         return f";;{json.dumps(response, ensure_ascii=False, separators=(',', ':'))};;"
     
-    def build_error_response(self, req_id, info, error_code, error_msg):
+    def build_error_response(self, info, error_code, error_msg):
         """构建错误的MCP响应"""
         response = {
             "mcp": "response",
-            "id": req_id,
             "info": info,
             "error": {
                 "code": error_code,
@@ -769,8 +771,8 @@ if __name__ == "__main__":
     app = Agent()
     
     print("✅ Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
-    print("📚 支持的MCP操作：")
-    print("   - 终端命令：system.terminal.run")
+    print("📚 支持的MCP操作（三级method格式）：")
+    print("   - 终端命令：system.terminal.run（参数：command）")  # 修改此处提示
     print("   - Python单行命令：python.run.execute (command参数)")
     print("   - Python多行脚本：python.run.execute (script参数，列表形式)")
     print("   - 时间查询：system.time.get")
