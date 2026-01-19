@@ -33,3 +33,5 @@ A Super Agent
 - ## 未来
   - [ ] 允许自己编写mcp模块
   - [ ] 允许让ai执行python
+# 版本号规则
+![版本号命名规则](VersionCodeNamingRules.png)
