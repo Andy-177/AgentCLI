@@ -14,6 +14,20 @@ A Super Agent
 # 帮助
 在`AGENT`界面使用;;exit命令退出AgentCLI，使用;;config命令打开配置界面
 # 更新日志
+## Pre-release-1.1.1
+- ## 更新
+  - 1.移除了MCP协议里的`id`字段
+  - 2.将`module`和`method`字段合并为单一的`method`字段，采用`module.method.function`三级格式
+  - 3.system模块参数的键改为`command`，不再使用`command1`
+- ## 未来
+  - [ ] 添加对mcp插件(plugin)和模块(module)的支持，允许添加自定义的mcp工具
+  - [ ] 将powershell做成mcp模块，让有需求的用户可以使用
+  - [ ] 添加note模块，允许ai自行记录ai自己的笔记
+  - [ ] 添加memory模块，允许ai记录自己的记忆并以系统提示词的方式在聊天时发送给ai
+  - [ ] 添加library模块，允许ai自行查找技能教程并学习，类似skill
+- ## 注意
+  - 1.plugin是在mcp工具被调用后运行
+  - 2.module是始终接收mcp请求
 ## Release-1.1.0
 - ## 更新
   - 1.把system模块里的run方法改为terminal，cmd和shell合并为run函数
