@@ -14,6 +14,14 @@ A Super Agent
 # 帮助
 在`AGENT`界面使用;;exit命令退出AgentCLI，使用;;config命令打开配置界面
 # 更新日志
+## Beta-1.1.2.1
+- ## 更新
+  - 1.规范化返回响应的函数
+- ## 未来
+  - [ ] 添加对mcp插件(plugin)的支持，允许添加自定义的mcp工具
+  - [ ] 将powershell做成mcp模块，让有需求的用户可以使用
+  - [ ] 为其制作TUI，使其类似opencode
+  - [ ] 对历史记录的持久化存储在未来以session的形式回归
 ## Pre-release-1.1.2
 - ## 更新
   - 1.移除了`config`里的`save_history`和`send_saved_history`字段以及对应的功能
