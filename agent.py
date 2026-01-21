@@ -278,7 +278,7 @@ class Agent:
             system_content += "\n2. 执行Python代码："
             system_content += "\n- 单行命令：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"command\":\"print('hello')\"}};;"
             system_content += "\n- 多行脚本：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"script\":[\"print('hello')\",\"print('world')\",\"x=1+1\",\"print(x)\"]}};;"
-            system_content += "\n3. 获取时间：;;{\"mcp\":\"request\",\"method\":\"system.time.get\",\"params\":{\"type\":\"date\"}};;"
+            system_content += "\n3. 获取时间：;;{\"mcp\":\"request\",\"method\":\"system.time.get\",\"params\":{\"type\":\"date | time | all | stamp\"}};;"
             system_content += "\n4. 获取系统信息：;;{\"mcp\":\"request\",\"method\":\"system.info.get\",\"params\":{}};;"
             system_content += "\n注意：收到MCP响应后，不需要再次生成MCP请求，直接用自然语言回复用户即可"
 
@@ -341,6 +341,72 @@ class Agent:
             self.chat_history.append({"role": "user", "content": user_message})
             self.chat_history.append({"role": "assistant", "content": ai_response})
 
+    # ===================== 新增：统一的info构造函数 =====================
+    def build_info_dict(self, parsed):
+        """
+        统一构造info字典
+        :param parsed: parse_mcp_request解析后的字典
+        :return: 标准化的info字典
+        """
+        return {
+            "method": parsed["full_method"],  # 完整三级方法名
+            "params": parsed["params"]        # 请求参数
+        }
+
+    # ===================== 新增：统一的响应处理函数 =====================
+    def handle_mcp_response(self, parsed, is_success=True, result=None, error_code=None, error_msg=None):
+        """
+        统一处理MCP响应生成
+        :param parsed: parse_mcp_request解析后的字典
+        :param is_success: 是否成功（True/False）
+        :param result: 成功时的结果数据（dict）
+        :param error_code: 失败时的错误码（int）
+        :param error_msg: 失败时的错误信息（str）
+        :return: 格式化的MCP响应字符串
+        """
+        # 统一构造info字典
+        info = self.build_info_dict(parsed)
+        
+        # 根据成功/失败生成响应
+        if is_success:
+            response = {
+                "mcp": "response",
+                "info": info,
+                "result": result or {}
+            }
+        else:
+            response = {
+                "mcp": "response",
+                "info": info,
+                "error": {
+                    "code": error_code or 9999,
+                    "message": error_msg or "未知错误"
+                }
+            }
+        
+        # 生成最终响应字符串
+        response_str = f";;{json.dumps(response, ensure_ascii=False, separators=(',', ':'))};;"
+        
+        # 统一打印响应日志（根据logger模式）
+        self.log_mcp_response(response_str)
+        
+        return response_str
+
+    def log_mcp_response(self, response_str):
+        """统一打印MCP响应日志"""
+        logger_mode = self.config.logger
+        if logger_mode in ["all", "format"]:
+            try:
+                json_str = response_str[2:-2]
+                json_data = json.loads(json_str)
+                if logger_mode == "all":
+                    print(f"[日志] mcp返回:\n{json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))}")
+                elif logger_mode == "format":
+                    print(f"[日志] mcp返回:")
+                    print(format_json_for_log(json_data, "  "))
+            except:
+                print(f"[日志] mcp返回: {response_str}")
+
     # ===================== MCP协议处理方法（原mcp类的方法） =====================
     def parse_mcp_request(self, mcp_json):
         """解析MCP请求JSON（解析三级method格式：module.method.func）"""
@@ -376,65 +442,38 @@ class Agent:
         
         parsed = self.parse_mcp_request(mcp_json)
         if "error" in parsed:
-            response = self.build_error_response(
-                {"method": parsed.get("full_method", ""), "params": parsed.get("params", {})},
-                1001,
-                parsed["error"]
+            # 使用统一响应函数生成错误响应
+            return self.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1001,
+                error_msg=parsed["error"]
             )
-            # lite模式下不打印MCP响应的原始日志
-            if logger_mode in ["all", "format"]:
-                if logger_mode == "all":
-                    print(f"[日志] mcp返回:\n{json.dumps(json.loads(response[2:-2]), ensure_ascii=False, separators=(',', ':'))}")
-                elif logger_mode == "format":
-                    print(f"[日志] mcp返回:")
-                    if response.startswith(";;") and response.endswith(";;"):
-                        json_str = response[2:-2]
-                        print(format_json_for_log(json_str, "  "))
-                    else:
-                        print(f"  {response}")
-            return response
         
         module = parsed["module"]
         if module == "system":
-            response = self.handle_system_module(parsed)
+            return self.handle_system_module(parsed)
         elif module == "python":
-            response = self.handle_python_module(parsed)
+            return self.handle_python_module(parsed)
         else:
-            response = self.build_error_response(
-                {"method": parsed.get("full_method", ""), "params": parsed.get("params", {})},
-                1002,
-                f"未知模块: {module}"
+            # 使用统一响应函数生成错误响应
+            return self.handle_mcp_response(
+                parsed=parsed,
+                is_success=False,
+                error_code=1002,
+                error_msg=f"未知模块: {module}"
             )
-        
-        # lite模式下不打印MCP响应的原始日志
-        if logger_mode in ["all", "format"]:
-            if logger_mode == "all":
-                print(f"[日志] mcp返回:\n{json.dumps(json.loads(response[2:-2]), ensure_ascii=False, separators=(',', ':'))}")
-            elif logger_mode == "format":
-                print(f"[日志] mcp返回:")
-                if response.startswith(";;") and response.endswith(";;"):
-                    json_str = response[2:-2]
-                    print(format_json_for_log(json_str, "  "))
-                else:
-                    print(f"  {response}")
-        
-        return response
     
     def handle_system_module(self, parsed):
         """处理system模块的MCP请求"""
-        module = parsed["module"]
-        method = parsed["method"]
-        func = parsed["func"]
-        full_method = parsed["full_method"]
-        params = parsed["params"]
-        result = {}
-        
-        info = {
-            "method": full_method,
-            "params": params
-        }
-        
         try:
+            module = parsed["module"]
+            method = parsed["method"]
+            func = parsed["func"]
+            full_method = parsed["full_method"]
+            params = parsed["params"]
+            result = {}
+            
             # system模块支持的方法：terminal.run, time.get, info.get
             if method == "terminal" and func == "run":
                 # 修改：只处理command键名，不再遍历所有key
@@ -453,48 +492,62 @@ class Agent:
                 else:
                     # 没有command键的错误提示
                     result["error"] = "参数错误：必须提供'command'键来指定要执行的终端命令"
-                return self.build_success_response(info, result)
+                # 使用统一响应函数生成成功响应
+                return self.handle_mcp_response(
+                    parsed=parsed,
+                    is_success=True,
+                    result=result
+                )
             
             elif method == "time" and func == "get":
                 time_type = list(params.values())[0] if params else ""
                 time_value = self.get_time_raw(time_type)
                 result = {"time": time_value}
-                return self.build_success_response(info, result)
+                # 使用统一响应函数生成成功响应
+                return self.handle_mcp_response(
+                    parsed=parsed,
+                    is_success=True,
+                    result=result
+                )
             
             elif method == "info" and func == "get":
                 info_value = self.get_system_info_raw()
                 result = {"system_info": info_value}
-                return self.build_success_response(info, result)
+                # 使用统一响应函数生成成功响应
+                return self.handle_mcp_response(
+                    parsed=parsed,
+                    is_success=True,
+                    result=result
+                )
             
             else:
-                return self.build_error_response(
-                    info,
-                    1003,
-                    f"未知的方法组合: {full_method}，system模块仅支持 terminal.run / time.get / info.get"
+                # 使用统一响应函数生成错误响应
+                return self.handle_mcp_response(
+                    parsed=parsed,
+                    is_success=False,
+                    error_code=1003,
+                    error_msg=f"未知的方法组合: {full_method}，system模块仅支持 terminal.run / time.get / info.get"
                 )
         
         except Exception as e:
-            return self.build_error_response(
-                info,
-                1004,
-                f"执行命令失败: {str(e)}"
+            # 使用统一响应函数生成错误响应
+            return self.handle_mcp_response(
+                parsed=parsed,
+                is_success=False,
+                error_code=1004,
+                error_msg=f"执行命令失败: {str(e)}"
             )
     
     def handle_python_module(self, parsed):
         """处理python模块的MCP请求"""
-        module = parsed["module"]
-        method = parsed["method"]
-        func = parsed["func"]
-        full_method = parsed["full_method"]
-        params = parsed["params"]
-        result = {}
-        
-        info = {
-            "method": full_method,
-            "params": params
-        }
-        
         try:
+            module = parsed["module"]
+            method = parsed["method"]
+            func = parsed["func"]
+            full_method = parsed["full_method"]
+            params = parsed["params"]
+            result = {}
+            
             # Python模块只支持run.execute方法
             if method == "run" and func == "execute":
                 # 遍历参数执行Python代码
@@ -531,42 +584,30 @@ class Agent:
                         # 未知参数键
                         result[param_key] = f"错误: 不支持的参数键 '{param_key}'，仅支持 command/script"
                 
-                return self.build_success_response(info, result)
+                # 使用统一响应函数生成成功响应
+                return self.handle_mcp_response(
+                    parsed=parsed,
+                    is_success=True,
+                    result=result
+                )
             
             else:
-                return self.build_error_response(
-                    info,
-                    2001,
-                    f"Python模块未知的方法组合: {full_method}，仅支持 run.execute"
+                # 使用统一响应函数生成错误响应
+                return self.handle_mcp_response(
+                    parsed=parsed,
+                    is_success=False,
+                    error_code=2001,
+                    error_msg=f"Python模块未知的方法组合: {full_method}，仅支持 run.execute"
                 )
         
         except Exception as e:
-            return self.build_error_response(
-                info,
-                2002,
-                f"执行Python代码失败: {str(e)}"
+            # 使用统一响应函数生成错误响应
+            return self.handle_mcp_response(
+                parsed=parsed,
+                is_success=False,
+                error_code=2002,
+                error_msg=f"执行Python代码失败: {str(e)}"
             )
-    
-    def build_success_response(self, info, result):
-        """构建成功的MCP响应"""
-        response = {
-            "mcp": "response",
-            "info": info,
-            "result": result
-        }
-        return f";;{json.dumps(response, ensure_ascii=False, separators=(',', ':'))};;"
-    
-    def build_error_response(self, info, error_code, error_msg):
-        """构建错误的MCP响应"""
-        response = {
-            "mcp": "response",
-            "info": info,
-            "error": {
-                "code": error_code,
-                "message": error_msg
-            }
-        }
-        return f";;{json.dumps(response, ensure_ascii=False, separators=(',', ':'))};;"
 
     # ===================== 命令执行方法 =====================
     def run_terminal_command(self, command):
