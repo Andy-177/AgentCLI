@@ -23,7 +23,7 @@ A Super Agent
   - [ ] 添加对mcp插件(plugin)的支持，允许添加自定义的mcp工具
   - [ ] 将powershell做成mcp模块，让有需求的用户可以使用
   - [ ] 为其制作TUI，使其类似opencode
-  - [ ] 对历史记录的持久化存储在未来以
+  - [ ] 对历史记录的持久化存储在未来以session的形式回归
 ## Pre-release-1.1.1
 - ## 更新
   - 1.移除了MCP协议里的`id`字段
