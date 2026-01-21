@@ -17,10 +17,8 @@ class Config(BaseModel):
     model: str = "default_model"
     user_name: str = "用户"
     ai_name: str = "AI"
-    prompt_file: str = "None"
+    prompt: str = "None"  # 原prompt_file改为prompt
     send_history: bool = False
-    save_history: bool = False
-    send_saved_history: bool = False
     logger: str = "None"  # 可选值：all/format/lite/None
 
     def save_to_file(self, file_path="config.json"):
@@ -80,6 +78,17 @@ class Config(BaseModel):
             # 获取用户配置值（不存在则用默认值）
             user_value = loaded_data.get(key, default_value)
             
+            # 兼容旧的prompt_file配置项（自动迁移）
+            if key == "prompt" and "prompt_file" in loaded_data and key not in loaded_data:
+                user_value = loaded_data["prompt_file"]
+                config_errors.append({
+                    "type": "config_migrate",
+                    "message": "检测到旧配置项prompt_file，已自动迁移为新配置项prompt",
+                    "original_key": "prompt_file",
+                    "new_key": "prompt",
+                    "value": user_value
+                })
+            
             # 校验并修复配置项
             if key == "logger":
                 # 校验logger取值范围（包含lite选项）
@@ -95,7 +104,7 @@ class Config(BaseModel):
                 else:
                     validated_data[key] = user_value
             
-            elif key in ["send_history", "save_history", "send_saved_history"]:
+            elif key == "send_history":
                 # 校验布尔类型配置
                 if not isinstance(user_value, bool):
                     config_errors.append({
@@ -108,7 +117,7 @@ class Config(BaseModel):
                 else:
                     validated_data[key] = user_value
             
-            elif key in ["api_url", "api_key", "model", "user_name", "ai_name", "prompt_file"]:
+            elif key in ["api_url", "api_key", "model", "user_name", "ai_name", "prompt"]:  # 改为prompt
                 # 校验字符串类型配置
                 if not isinstance(user_value, str):
                     config_errors.append({
@@ -164,14 +173,28 @@ def format_json_for_log(json_data, prefix="[日志] "):
 class Agent:
     def __init__(self):
         """初始化Agent，加载并校验配置"""
+        # 自动检测并创建prompt文件夹
+        self.prompt_dir = "prompt"
+        self.create_prompt_dir()
+        
         # 加载配置并获取错误信息
         self.config, self.config_errors = Config.load_and_validate()
         self.prompt_files = self.get_prompt_files()
         self.chat_history = []
-        self.saved_history = self.load_saved_history()
         
         # 打印配置错误提示（如果有）
         self.print_config_errors()
+
+    def create_prompt_dir(self):
+        """检测并创建prompt文件夹"""
+        if not os.path.exists(self.prompt_dir):
+            try:
+                os.makedirs(self.prompt_dir)
+                print(f"📁 已自动创建prompt文件夹：{os.path.abspath(self.prompt_dir)}")
+            except Exception as e:
+                print(f"⚠️ 创建prompt文件夹失败：{str(e)}")
+        else:
+            print(f"📁 prompt文件夹已存在：{os.path.abspath(self.prompt_dir)}")
 
     def print_config_errors(self):
         """打印配置错误修复信息"""
@@ -189,6 +212,10 @@ class Agent:
                     print(f"   {error['action']} {error['backup_file']}")
                 else:
                     print(f"   {error['action']}")
+            elif error.get("type") == "config_migrate":
+                # 配置项迁移提示
+                print(f"🔄 {error['message']}")
+                print(f"   原配置项值：{repr(error['value'])}")
             elif error.get("item"):
                 # 配置项级错误
                 print(f"🔧 配置项 '{error['item']}'：")
@@ -203,8 +230,11 @@ class Agent:
         print("💡 你可以使用 ;;config 命令重新配置这些项\n")
 
     def get_prompt_files(self):
-        """获取根目录下的所有 .txt 文件"""
-        files = [f for f in os.listdir() if f.endswith('.txt')]
+        """获取prompt文件夹下的所有 .txt 文件"""
+        if not os.path.exists(self.prompt_dir):
+            return ["无"]
+        
+        files = [f for f in os.listdir(self.prompt_dir) if f.endswith('.txt')]
         return ["无"] + files
 
     def save_config(self):
@@ -252,17 +282,17 @@ class Agent:
             system_content += "\n4. 获取系统信息：;;{\"mcp\":\"request\",\"method\":\"system.info.get\",\"params\":{}};;"
             system_content += "\n注意：收到MCP响应后，不需要再次生成MCP请求，直接用自然语言回复用户即可"
 
-            if self.config.prompt_file != "None":
+            # 加载prompt文件夹中的提示词文件
+            if self.config.prompt != "None":
+                prompt_file_path = os.path.join(self.prompt_dir, self.config.prompt)
                 try:
-                    with open(self.config.prompt_file, "r", encoding="utf-8") as f:
+                    with open(prompt_file_path, "r", encoding="utf-8") as f:
                         prompt_content = f.read()
                     system_content += f"\n{prompt_content}"
+                except FileNotFoundError:
+                    self.log_ai_message(f"提示词文件不存在: {prompt_file_path}")
                 except Exception as e:
                     self.log_ai_message(f"读取提示词文件失败: {str(e)}")
-
-            if self.config.send_saved_history:
-                for entry in self.saved_history:
-                    system_content += f"\n{entry['role']}: {entry['content']}"
 
             messages = [{"role": "system", "content": system_content}]
 
@@ -310,9 +340,6 @@ class Agent:
             print(f"{self.config.ai_name}: {ai_response}")
             self.chat_history.append({"role": "user", "content": user_message})
             self.chat_history.append({"role": "assistant", "content": ai_response})
-
-            if self.config.save_history:
-                self.save_chat_history(user_message, ai_response)
 
     # ===================== MCP协议处理方法（原mcp类的方法） =====================
     def parse_mcp_request(self, mcp_json):
@@ -728,27 +755,6 @@ class Agent:
         """获取系统信息"""
         return f"{platform.system()} {platform.release()}"
 
-    def save_chat_history(self, user_message, ai_response):
-        """保存聊天记录"""
-        history_file = "history.hty"
-        with open(history_file, "a", encoding="utf-8") as f:
-            f.write(f"{self.config.user_name}: {user_message}\n")
-            f.write(f"{self.config.ai_name}: {ai_response}\n")
-
-    def load_saved_history(self):
-        """加载已保存的历史记录"""
-        history_file = "history.hty"
-        saved_history = []
-        if os.path.exists(history_file):
-            with open(history_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                for i in range(0, len(lines), 2):
-                    user_message = lines[i].strip()
-                    ai_response = lines[i + 1].strip() if i + 1 < len(lines) else ""
-                    saved_history.append({"role": "user", "content": user_message})
-                    saved_history.append({"role": "assistant", "content": ai_response})
-        return saved_history
-
 # ===================== 辅助函数 =====================
 def clear():
     """清空屏幕"""
@@ -782,6 +788,7 @@ if __name__ == "__main__":
     print("   - format: 格式化显示所有日志")
     print("   - lite: 仅显示模块执行结果（简洁模式），格式为 [模块名@方法名:函数名] 执行结果: 内容")
     print("   - None: 不显示任何日志")
+    print(f"📁 提示词文件请放在 {os.path.abspath('prompt')} 文件夹中，支持.txt格式")
     print()
     
     while True:
@@ -850,6 +857,7 @@ if __name__ == "__main__":
                     print("      set logger lite")
                     print("      set send_history True")
                     print("      set api_key sk-xxxxxxxxxxxx")
+                    print("      set prompt my_prompt.txt  # 设置prompt文件夹中的提示词文件")
                     print()
                     print("5. back")
                     print("   作用：返回主对话界面")
@@ -894,26 +902,17 @@ if __name__ == "__main__":
                             "默认值": "AI",
                             "示例": "助手, ChatGPT"
                         },
-                        "prompt_file": {
-                            "作用": "自定义提示词文件路径（.txt格式）",
+                        "prompt": {  # 改为prompt
+                            "作用": "prompt文件夹下的自定义提示词文件名（.txt格式）",
                             "类型": "字符串",
                             "默认值": "None",
-                            "说明": "设置为None则不使用自定义提示词，否则填写文件名如'prompt.txt'"
+                            "说明": """
+  - 设置为None则不使用自定义提示词
+  - 只需填写文件名，无需填写路径（文件必须放在prompt文件夹中）
+  - 示例：set prompt my_prompt.txt"""
                         },
                         "send_history": {
                             "作用": "是否将当前会话历史发送给AI",
-                            "类型": "布尔值",
-                            "默认值": "False",
-                            "合法值": "True/False"
-                        },
-                        "save_history": {
-                            "作用": "是否保存聊天记录到history.hty文件",
-                            "类型": "布尔值",
-                            "默认值": "False",
-                            "合法值": "True/False"
-                        },
-                        "send_saved_history": {
-                            "作用": "是否将已保存的历史记录发送给AI",
                             "类型": "布尔值",
                             "默认值": "False",
                             "合法值": "True/False"
@@ -946,6 +945,7 @@ if __name__ == "__main__":
                         if len(parts) < 3:
                             print("❌ 用法错误：set <配置项> <值>")
                             print("💡 示例：set logger lite 或 set send_history True")
+                            print("💡 设置提示词文件：set prompt my_prompt.txt")
                             continue
                         
                         _, key, value = parts
@@ -960,7 +960,7 @@ if __name__ == "__main__":
                             setattr(app.config, key, value)
                             app.save_config()
                         
-                        elif key in ["send_history", "save_history", "send_saved_history"]:
+                        elif key == "send_history":
                             if value.lower() == "true":
                                 valid_value = True
                             elif value.lower() == "false":
@@ -971,7 +971,7 @@ if __name__ == "__main__":
                             setattr(app.config, key, valid_value)
                             app.save_config()
                         
-                        elif key in ["api_url", "api_key", "model", "user_name", "ai_name", "prompt_file"]:
+                        elif key in ["api_url", "api_key", "model", "user_name", "ai_name", "prompt"]:  # 改为prompt
                             # 字符串类型直接保存
                             setattr(app.config, key, value)
                             app.save_config()
