@@ -274,7 +274,7 @@ class Agent:
             system_content += f"\n当前系统类型是：{platform.system()}"
             system_content += "\n你只能使用MCP协议格式进行操作，格式如下："
             system_content += "\n1. 执行终端命令："
-            system_content += "\n;;{\"mcp\":\"request\",\"method\":\"system.terminal.run\",\"params\":{\"command\":\"echo hello\"}};;"  # 修改此处示例
+            system_content += "\n;;{\"mcp\":\"request\",\"method\":\"system.terminal.run\",\"params\":{\"command\":\"echo hello\"}};;"
             system_content += "\n2. 执行Python代码："
             system_content += "\n- 单行命令：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"command\":\"print('hello')\"}};;"
             system_content += "\n- 多行脚本：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"script\":[\"print('hello')\",\"print('world')\",\"x=1+1\",\"print(x)\"]}};;"
@@ -407,30 +407,63 @@ class Agent:
             except:
                 print(f"[日志] mcp返回: {response_str}")
 
-    # ===================== MCP协议处理方法（原mcp类的方法） =====================
-    def parse_mcp_request(self, mcp_json):
-        """解析MCP请求JSON（解析三级method格式：module.method.func）"""
+    # ===================== 核心改造：统一MCP协议解析函数 =====================
+    def parse_mcp_protocol(self, mcp_json):
+        """
+        统一解析MCP协议请求，实现协议解析与业务处理解耦
+        负责：格式合法性校验、核心字段提取、三级method解析
+        :param mcp_json: 原始MCP请求JSON字典
+        :return: 标准化解析结果（dict），包含error则为解析失败
+        """
         try:
-            full_method = mcp_json.get("method", "")
-            method_parts = full_method.split(".")
+            # 1. 基础格式校验：必须包含mcp和method字段
+            if not isinstance(mcp_json, dict):
+                return {"error": "MCP请求必须是JSON对象", "error_code": 1000}
             
-            # 解析三级结构：module.method.func
-            module = method_parts[0] if len(method_parts) > 0 else ""
-            method = method_parts[1] if len(method_parts) > 1 else ""
-            func = method_parts[2] if len(method_parts) > 2 else ""
+            if "mcp" not in mcp_json:
+                return {"error": "MCP请求缺少核心字段：mcp", "error_code": 1001}
             
+            if mcp_json["mcp"] != "request":
+                return {"error": f"不支持的MCP类型：{mcp_json['mcp']}，仅支持request", "error_code": 1002}
+            
+            if "method" not in mcp_json:
+                return {"error": "MCP请求缺少核心字段：method", "error_code": 1003}
+            
+            full_method = mcp_json["method"]
+            if not isinstance(full_method, str) or not full_method.strip():
+                return {"error": "method字段必须是非空字符串", "error_code": 1004}
+            
+            # 2. 三级method解析（module.method.func）
+            method_parts = full_method.strip().split(".")
+            if len(method_parts) != 3:
+                return {"error": f"method必须是三级格式：module.method.func，当前：{full_method}", "error_code": 1005}
+            
+            module, method, func = method_parts
+            if not all([module.strip(), method.strip(), func.strip()]):
+                return {"error": "三级method的每一部分都不能为空", "error_code": 1006}
+            
+            # 3. 提取参数（params可选，默认空字典）
+            params = mcp_json.get("params", {})
+            if not isinstance(params, dict):
+                return {"error": "params字段必须是JSON对象", "error_code": 1007}
+            
+            # 4. 返回标准化解析结果（无error表示解析成功）
             return {
-                "module": module,
-                "method": method,
-                "func": func,
-                "full_method": full_method,
-                "params": mcp_json.get("params", {})
+                "mcp_type": mcp_json["mcp"],       # MCP类型（固定为request）
+                "module": module,                 # 一级模块（如system/python）
+                "method": method,                 # 二级方法（如terminal/run）
+                "func": func,                     # 三级函数（如run/execute）
+                "full_method": full_method,       # 完整三级method
+                "params": params,                 # 标准化参数字典
+                "raw_request": mcp_json           # 保留原始请求（可选，用于日志/调试）
             }
+        
         except Exception as e:
-            return {"error": f"解析MCP请求失败: {str(e)}"}
-    
+            return {"error": f"MCP协议解析异常：{str(e)}", "error_code": 9999}
+
+    # ===================== MCP协议处理方法（改造后） =====================
     def handle_mcp_request(self, mcp_json):
-        """处理MCP请求并返回响应"""
+        """处理MCP请求并返回响应（改造后：仅负责调度，不做解析）"""
         logger_mode = self.config.logger
         # lite模式下不打印MCP请求的原始日志
         if logger_mode in ["all", "format"]:
@@ -440,42 +473,43 @@ class Agent:
                 print(f"[日志] mcp请求:")
                 print(format_json_for_log(mcp_json, "  "))
         
-        parsed = self.parse_mcp_request(mcp_json)
+        # 核心：调用统一解析层解析MCP协议
+        parsed = self.parse_mcp_protocol(mcp_json)
+        
+        # 解析失败：返回标准化错误响应
         if "error" in parsed:
-            # 使用统一响应函数生成错误响应
             return self.handle_mcp_response(
                 parsed={"full_method": "", "params": {}},
                 is_success=False,
-                error_code=1001,
+                error_code=parsed.get("error_code", 1001),
                 error_msg=parsed["error"]
             )
         
+        # 解析成功：根据模块调度业务处理
         module = parsed["module"]
         if module == "system":
             return self.handle_system_module(parsed)
         elif module == "python":
             return self.handle_python_module(parsed)
         else:
-            # 使用统一响应函数生成错误响应
+            # 未知模块：返回标准化错误响应
             return self.handle_mcp_response(
                 parsed=parsed,
                 is_success=False,
                 error_code=1002,
-                error_msg=f"未知模块: {module}"
+                error_msg=f"未知模块: {module}，仅支持system/python"
             )
     
     def handle_system_module(self, parsed):
-        """处理system模块的MCP请求"""
+        """处理system模块的MCP请求（改造后：仅接收统一解析后的标准化数据）"""
         try:
-            module = parsed["module"]
-            method = parsed["method"]
-            func = parsed["func"]
+            # 直接从统一解析结果中获取数据，无需再解析
             full_method = parsed["full_method"]
             params = parsed["params"]
             result = {}
             
             # system模块支持的方法：terminal.run, time.get, info.get
-            if method == "terminal" and func == "run":
+            if parsed["method"] == "terminal" and parsed["func"] == "run":
                 # 修改：只处理command键名，不再遍历所有key
                 if "command" in params:
                     cmd_value = params["command"]
@@ -499,7 +533,7 @@ class Agent:
                     result=result
                 )
             
-            elif method == "time" and func == "get":
+            elif parsed["method"] == "time" and parsed["func"] == "get":
                 time_type = list(params.values())[0] if params else ""
                 time_value = self.get_time_raw(time_type)
                 result = {"time": time_value}
@@ -510,7 +544,7 @@ class Agent:
                     result=result
                 )
             
-            elif method == "info" and func == "get":
+            elif parsed["method"] == "info" and parsed["func"] == "get":
                 info_value = self.get_system_info_raw()
                 result = {"system_info": info_value}
                 # 使用统一响应函数生成成功响应
@@ -539,17 +573,15 @@ class Agent:
             )
     
     def handle_python_module(self, parsed):
-        """处理python模块的MCP请求"""
+        """处理python模块的MCP请求（改造后：仅接收统一解析后的标准化数据）"""
         try:
-            module = parsed["module"]
-            method = parsed["method"]
-            func = parsed["func"]
+            # 直接从统一解析结果中获取数据，无需再解析
             full_method = parsed["full_method"]
             params = parsed["params"]
             result = {}
             
             # Python模块只支持run.execute方法
-            if method == "run" and func == "execute":
+            if parsed["method"] == "run" and parsed["func"] == "execute":
                 # 遍历参数执行Python代码
                 for param_key, param_value in params.items():
                     if param_key == "command":
@@ -819,7 +851,7 @@ if __name__ == "__main__":
     
     print("✅ Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
     print("📚 支持的MCP操作（三级method格式）：")
-    print("   - 终端命令：system.terminal.run（参数：command）")  # 修改此处提示
+    print("   - 终端命令：system.terminal.run（参数：command）")
     print("   - Python单行命令：python.run.execute (command参数)")
     print("   - Python多行脚本：python.run.execute (script参数，列表形式)")
     print("   - 时间查询：system.time.get")
@@ -943,7 +975,7 @@ if __name__ == "__main__":
                             "默认值": "AI",
                             "示例": "助手, ChatGPT"
                         },
-                        "prompt": {  # 改为prompt
+                        "prompt": {
                             "作用": "prompt文件夹下的自定义提示词文件名（.txt格式）",
                             "类型": "字符串",
                             "默认值": "None",
@@ -1012,7 +1044,7 @@ if __name__ == "__main__":
                             setattr(app.config, key, valid_value)
                             app.save_config()
                         
-                        elif key in ["api_url", "api_key", "model", "user_name", "ai_name", "prompt"]:  # 改为prompt
+                        elif key in ["api_url", "api_key", "model", "user_name", "ai_name", "prompt"]:
                             # 字符串类型直接保存
                             setattr(app.config, key, value)
                             app.save_config()
