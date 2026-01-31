@@ -1,0 +1,89 @@
+# 说明
+module（即MCP module）是用于拓展AgentCLI的组件，其功能类似于MCP服务器，但不依赖网络传输，AgentCLI客户端会注入变量以及部分函数调用方法会注入到模块里，module接受到对应变量后执行操作然后返回响应给ai
+
+# 工作方式
+类似于MCP服务器，MCP模块会被AgentCLI使用exec或evel执行，并注入必要变量和所需的函数，每个MCP模块都会使用一个单独的线程运行。
+
+# 注入（Inject）
+## 变量
+### MCP请求被解析后的变量
+| 变量名 | 数据类型 | 核心含义 | 取值示例 | 补充说明 |
+| :----- | :------- | :------- | :------- | :------- |
+| `req` | dict/None | 完整的原生MCP请求JSON字典 | `{"mcp":"request","method":"system.terminal.run","params":{"command":"echo hello"}}` | 解析前为None，解析成功后赋值为MCP原始请求的完整字典，保留所有请求字段 |
+| `module` | str/None | MCP请求解析后的**一级模块名** | `system`、`python` | 从三级method中拆分的第一个部分，用于调度对应业务模块，解析失败为None |
+| `method` | str/None | MCP请求解析后的**二级方法名** | `terminal`、`run`、`time`、`info` | 从三级method中拆分的第二个部分，用于区分模块下的具体方法集，解析失败为None |
+| `func` | str/None | MCP请求解析后的**三级函数名** | `run`、`execute`、`get` | 从三级method中拆分的第三个部分，用于区分方法集下的具体执行函数，解析失败为None |
+| `params` | dict | MCP请求解析后的参数字典 | `{"command":"echo hello"}`、`{"type":"date"}` | 始终为字典类型，无参数时为空字典`{}`，解析失败时也保持空字典，保证业务模块调用无类型错误 |
+| `rawmet` | str/None | MCP请求中原始的**完整三级method字段** | `system.terminal.run`、`python.run.execute`、`system.time.get` | 直接提取自MCP请求的`method`字段，未做任何拆分处理，解析失败为None |
+### 全局配置（config）
+| 全局变量名   | 字段类型 | 合法取值/格式       | 默认值 | 核心作用                                                                 |
+|--------------|----------|---------------------|--------|--------------------------------------------------------------------------|
+| api_url      | 字符串   | 合法HTTP/HTTPS地址  | https://api.example.com/v1/chat/completions | AI接口的请求地址，用于调用大模型API|
+| api_key      | 字符串   | 接口平台颁发的密钥  | your_api_key_here | AI接口的认证密钥，请求头中Bearer认证的核心值|
+| model        | 字符串   | 平台支持的模型名    | default_model | 要调用的大模型名称（如gpt-3.5-turbo、claude-3-haiku）|
+| user_name    | 字符串   | 任意字符            | 用户   | 对话界面的输入提示符前缀，显示当前用户名|
+| ai_name      | 字符串   | 任意字符            | AI     | 对话界面的AI回复前缀，显示AI助手名称|
+| prompt       | 字符串   | None/xxx.txt        | None   | 指定prompt文件夹下的自定义提示词文件，None表示不加载自定义提示词|
+| send_history | 布尔值   | True/False          | False  | 调用AI接口时是否携带历史对话记录，True为携带，False为仅发送当前消息|
+| logger       | 字符串   | all/format/lite/None | None   | 日志输出模式，控制MCP请求/响应、命令执行过程的日志展示形式|
+## 函数
+### 要注入的函数
+handle_mcp_response()，此函数用于构建响应并返回给ai
+
+# 编写MCP模块
+## 目录格式
+在程序所在的同一目录下，会有一个叫modules的文件夹，此文件夹用于存放所有模块
+```
+│  agent.py
+│  AGENTS.md
+│  config.json
+├─modules
+│  └─模块文件夹
+└─prompt
+```
+## 模块的文件结构
+模块由description.txt（可选），main.py（必须），manifest.json（必须）这三个文件构成
+
+description.txt是给AI看的模块说明书，main.py是模块主程序，manifest.json是模块的描述文件，main.py接受被注入的变量，从而执行对应功能并使用handle_mcp_response()发送返回给AI。
+
+### manifest.json的格式
+```
+{
+    "name": "example",
+    "description": "an example mcp module",
+    "version": "1.0.0",
+    "author": "MCP Agent",
+    "license": "MIT",
+    "homepage": "https://github.com/mcp-agent/toolkit-plugin",
+    "repo": "https://github.com/mcp-agent/toolkit-plugin"
+}
+```
+在manifest里，除了name和version是必须要有的，其他字段可有可无
+#### name的用途
+name字段及模块名字，比如在系统模块system里，system就是这个模块对应的模块名，如果ai要调用`system.time.get`，那么`system.time.get`里的system就是模块名，模块名不可以有除英文和数字外的任何字符串，模块名建议使用纯英文小写
+#### version的判断和处理
+version是模块的版本号，版本号必须是一串用`.`分隔的数字，比如`1.2.3.4`，比较大小时从高位到低位开始比较，比如1.2.3和0.4.5在进行比较时，最高位1>0，则版本号1.2.3>0.4.5，如果是最高位数字相同，则向后一位再进行比较，如果后一位也相同，就再向后移动一位，比如1.2.3和1.2.4，最高位1相同，往后一位继续比较，2相同，再往后一位，3<4，则1.2.3<1.2.4，如果每一位数值都相同则两个版本号相等，如1.2.3.4=1.2.3.4，如果有两个版本号位数不同，则在位数较少的版本号后面补0，比如1.2.3和1.2.3.1，由于1.2.3比1.2.3.1少一位，则在后面补0，1.2.3变为1.2.3.0，1.2.3.0<1.2.3.1，所有1.2.3.0<1.2.3.1，如果是1.2.3和1.1.2.3，由于其第二位2>1，所以1.2.3>1.1.2.3
+
+如果modules文件夹出现了两个`name`字段完全一样的模块，则版本号高的留下，版本号低的被删除，或版本号高的覆盖版本号低的
+#### ai查看mcp模块
+随系统提示词发送下面的模块清单
+```
+已安装的mcp模块列表：
+"name": "example",
+    "description": "an example mcp module",
+    "version": "1.0.0",
+    "author": "MCP Agent",
+    "license": "MIT",
+    "homepage": "https://github.com/mcp-agent/toolkit-plugin",
+    "repo": "https://github.com/mcp-agent/toolkit-plugin"
+"name": "xexample",
+    "description": "an example2 mcp module",
+    "version": "1.0.0",
+    "author": "MCP Agent",
+    "license": "MIT",
+    "homepage": "https://github.com/mcp-agent/toolkit-plugin",
+    "repo": "https://github.com/mcp-agent/toolkit-plugin"
+模块说明：
+"name": "example"
+     说明：description.txt里的内容
+```

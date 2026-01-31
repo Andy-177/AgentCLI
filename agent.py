@@ -10,6 +10,26 @@ import sys
 import io
 import contextlib
 
+# ===================== 全局变量定义（MCP统一解析结果）=====================
+# 全局存储MCP原生请求和解析后的标准化数据，所有模块直接使用
+req = None       # 完整的原生MCP请求JSON字典
+module = None    # 解析后的模块名（如system/python）
+method = None    # 解析后的方法名（如terminal/run）
+func = None      # 解析后的函数名（如run/execute）
+params = {}      # 解析后的参数字典（始终为dict，默认空）
+rawmet = None    # MCP请求里的完整method字段（三级格式：module.method.func）
+
+# ===================== 配置项全局变量（与Config模型字段一一对应）=====================
+# 所有配置值全局化，业务逻辑直接使用，由Agent统一维护同步
+api_url = "https://api.example.com/v1/chat/completions"
+api_key = "your_api_key_here"
+model = "default_model"
+user_name = "用户"
+ai_name = "AI"
+prompt = "None"  # 原prompt_file迁移后的字段
+send_history = False
+logger = "None"  # 可选值：all/format/lite/None
+
 # 定义配置模型
 class Config(BaseModel):
     api_url: str = "https://api.example.com/v1/chat/completions"
@@ -149,6 +169,109 @@ class Config(BaseModel):
         # 步骤5：返回修复后的配置和错误信息
         return cls(**validated_data), config_errors
 
+# ===================== 全局MCP统一解析函数 =====================
+def parse_mcp_protocol(mcp_json, agent):
+    """
+    全局统一解析MCP协议请求，解析成功后赋值全局变量，失败则返回错误响应
+    负责：格式合法性校验、核心字段提取、三级method解析、全局变量赋值
+    :param mcp_json: 原始MCP请求JSON字典
+    :param agent: Agent实例（用于生成错误响应）
+    :return: 解析成功返回None，解析失败返回标准化MCP错误响应字符串
+    """
+    global req, module, method, func, params, rawmet
+    # 解析前重置所有全局变量（避免脏数据）
+    req = None
+    module = None
+    method = None
+    func = None
+    params = {}
+    rawmet = None
+
+    try:
+        # 1. 基础格式校验：必须包含mcp和method字段
+        if not isinstance(mcp_json, dict):
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1000,
+                error_msg="MCP请求必须是JSON对象"
+            )
+        
+        if "mcp" not in mcp_json:
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1001,
+                error_msg="MCP请求缺少核心字段：mcp"
+            )
+        
+        if mcp_json["mcp"] != "request":
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1002,
+                error_msg=f"不支持的MCP类型：{mcp_json['mcp']}，仅支持request"
+            )
+        
+        if "method" not in mcp_json:
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1003,
+                error_msg="MCP请求缺少核心字段：method"
+            )
+        
+        rawmet = mcp_json["method"]  # 完整三级method字段
+        if not isinstance(rawmet, str) or not rawmet.strip():
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1004,
+                error_msg="method字段必须是非空字符串"
+            )
+        
+        # 2. 三级method解析（module.method.func）
+        method_parts = rawmet.strip().split(".")
+        if len(method_parts) != 3:
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1005,
+                error_msg=f"method必须是三级格式：module.method.func，当前：{rawmet}"
+            )
+        
+        module, method, func = method_parts
+        if not all([module.strip(), method.strip(), func.strip()]):
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1006,
+                error_msg="三级method的每一部分都不能为空"
+            )
+        
+        # 3. 提取参数（params可选，默认空字典）
+        params = mcp_json.get("params", {})
+        if not isinstance(params, dict):
+            return agent.handle_mcp_response(
+                parsed={"full_method": "", "params": {}},
+                is_success=False,
+                error_code=1007,
+                error_msg="params字段必须是JSON对象"
+            )
+        
+        # 4. 解析成功：赋值全局变量（req为原生请求）
+        req = mcp_json
+        return None  # 无返回值表示解析成功
+
+    except Exception as e:
+        # 解析异常：返回标准化错误响应
+        return agent.handle_mcp_response(
+            parsed={"full_method": "", "params": {}},
+            is_success=False,
+            error_code=9999,
+            error_msg=f"MCP协议解析异常：{str(e)}"
+        )
+
 # ===================== 工具函数 =====================
 def format_json_for_log(json_data, prefix="[日志] "):
     """格式化JSON数据用于日志输出"""
@@ -169,16 +292,35 @@ def format_json_for_log(json_data, prefix="[日志] "):
         return "\n".join(formatted_lines)
     return f"{prefix}{json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))}"
 
+# ===================== 核心工具函数：同步配置到全局变量 =====================
+def sync_config_to_global(config_instance):
+    """
+    将Config实例的配置值同步到全局变量，保证全局变量与实例配置一致
+    :param config_instance: Config模型实例
+    """
+    global api_url, api_key, model, user_name, ai_name, prompt, send_history, logger
+    api_url = config_instance.api_url
+    api_key = config_instance.api_key
+    model = config_instance.model
+    user_name = config_instance.user_name
+    ai_name = config_instance.ai_name
+    prompt = config_instance.prompt
+    send_history = config_instance.send_history
+    logger = config_instance.logger
+
 # ===================== Agent类（包含MCP处理逻辑） =====================
 class Agent:
     def __init__(self):
-        """初始化Agent，加载并校验配置"""
+        """初始化Agent，加载并校验配置，同步到全局变量"""
         # 自动检测并创建prompt文件夹
         self.prompt_dir = "prompt"
         self.create_prompt_dir()
         
         # 加载配置并获取错误信息
         self.config, self.config_errors = Config.load_and_validate()
+        # 关键：初始化时将配置同步到全局变量
+        sync_config_to_global(self.config)
+        
         self.prompt_files = self.get_prompt_files()
         self.chat_history = []
         
@@ -238,39 +380,41 @@ class Agent:
         return ["无"] + files
 
     def save_config(self):
-        """保存配置（仅当通过config命令设置合法值时）"""
+        """保存配置到文件，并同步到全局变量"""
         self.config.save_to_file()
-        print("✅ 配置已保存！")
+        # 关键：保存后同步全局变量，保证全局值最新
+        sync_config_to_global(self.config)
+        print("✅ 配置已保存并同步到全局！")
     
     def log_ai_message(self, message):
-        """统一的AI日志打印函数"""
-        logger_mode = self.config.logger
-        # lite模式下不打印AI消息日志
-        if logger_mode in ["all", "format"]:
+        """统一的AI日志打印函数（使用全局logger变量）"""
+        # 直接使用全局logger变量，替代self.config.logger
+        if logger in ["all", "format"]:
             if isinstance(message, str) and message.startswith(";;") and message.endswith(";;"):
                 json_str = message[2:-2]
                 try:
                     json_data = json.loads(json_str)
-                    if logger_mode == "all":
-                        print(f"[日志] {self.config.ai_name}: {json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))}")
-                    elif logger_mode == "format":
-                        print(f"[日志] {self.config.ai_name}:")
+                    if logger == "all":
+                        print(f"[日志] {ai_name}: {json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))}")
+                    elif logger == "format":
+                        print(f"[日志] {ai_name}:")
                         print(format_json_for_log(json_data, "  "))
                 except json.JSONDecodeError:
-                    print(f"[日志] {self.config.ai_name}: {message}")
+                    print(f"[日志] {ai_name}: {message}")
             else:
-                print(f"[日志] {self.config.ai_name}: {message}")
+                print(f"[日志] {ai_name}: {message}")
 
-    def send_message(self, user_message):
+    def send_message(self, user_msg):
         """发送用户消息"""
-        if not user_message:
+        if not user_msg:
             return
-        self.call_api(user_message)
+        self.call_api(user_msg)
 
-    def call_api(self, user_message):
-        """调用API获取AI响应"""
+    def call_api(self, user_msg):
+        """调用API获取AI响应（全程使用全局配置变量）"""
         try:
-            system_content = f"你是一个名为{self.config.ai_name}的AI助手，正在与用户{self.config.user_name}对话。"
+            # 直接使用全局ai_name、user_name变量
+            system_content = f"你是一个名为{ai_name}的AI助手，正在与用户{user_name}对话。"
             system_content += f"\n当前系统类型是：{platform.system()}"
             system_content += "\n你只能使用MCP协议格式进行操作，格式如下："
             system_content += "\n1. 执行终端命令："
@@ -282,9 +426,9 @@ class Agent:
             system_content += "\n4. 获取系统信息：;;{\"mcp\":\"request\",\"method\":\"system.info.get\",\"params\":{}};;"
             system_content += "\n注意：收到MCP响应后，不需要再次生成MCP请求，直接用自然语言回复用户即可"
 
-            # 加载prompt文件夹中的提示词文件
-            if self.config.prompt != "None":
-                prompt_file_path = os.path.join(self.prompt_dir, self.config.prompt)
+            # 加载prompt文件夹中的提示词文件（使用全局prompt变量）
+            if prompt != "None":
+                prompt_file_path = os.path.join(self.prompt_dir, prompt)
                 try:
                     with open(prompt_file_path, "r", encoding="utf-8") as f:
                         prompt_content = f.read()
@@ -296,30 +440,32 @@ class Agent:
 
             messages = [{"role": "system", "content": system_content}]
 
-            if self.config.send_history:
+            # 使用全局send_history变量判断是否发送历史
+            if send_history:
                 for entry in self.chat_history:
                     messages.append({"role": entry["role"], "content": entry["content"]})
 
-            messages.append({"role": "user", "content": user_message})
+            messages.append({"role": "user", "content": user_msg})
 
+            # 调用API（使用全局api_url、api_key、model变量）
             response = requests.post(
-                self.config.api_url,
-                headers={"Authorization": f"Bearer {self.config.api_key}"},
-                json={"model": self.config.model, "messages": messages}
+                api_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "messages": messages}
             )
 
             if response.status_code == 200:
-                ai_response = response.json().get("choices", [{}])[0].get("message", {}).get("content", "未获取到回复")
-                self.handle_ai_response(ai_response, user_message)
+                ai_resp = response.json().get("choices", [{}])[0].get("message", {}).get("content", "未获取到回复")
+                self.handle_ai_response(ai_resp, user_msg)
             else:
                 self.log_ai_message(f"错误: {response.text}")
         except Exception as e:
             self.log_ai_message(f"请求失败: {str(e)}")
 
-    def handle_ai_response(self, ai_response, user_message):
+    def handle_ai_response(self, ai_resp, user_msg):
         """处理AI响应"""
         mcp_pattern = r";;({.*?});;"
-        mcp_matches = re.findall(mcp_pattern, ai_response, re.DOTALL)
+        mcp_matches = re.findall(mcp_pattern, ai_resp, re.DOTALL)
         
         if mcp_matches:
             for mcp_str in mcp_matches:
@@ -327,9 +473,9 @@ class Agent:
                     mcp_json = json.loads(mcp_str)
                     if mcp_json.get("mcp") == "request":
                         # 直接调用自身的MCP处理方法
-                        mcp_response = self.handle_mcp_request(mcp_json)
-                        self.chat_history.append({"role": "assistant", "content": ai_response})
-                        self.call_api(mcp_response)
+                        mcp_resp = self.handle_mcp_request(mcp_json)
+                        self.chat_history.append({"role": "assistant", "content": ai_resp})
+                        self.call_api(mcp_resp)
                 except json.JSONDecodeError as e:
                     error_msg = f"MCP JSON解析错误: {str(e)}"
                     self.log_ai_message(error_msg)
@@ -337,35 +483,34 @@ class Agent:
                     error_msg = f"MCP处理错误: {str(e)}"
                     self.log_ai_message(error_msg)
         else:
-            print(f"{self.config.ai_name}: {ai_response}")
-            self.chat_history.append({"role": "user", "content": user_message})
-            self.chat_history.append({"role": "assistant", "content": ai_response})
+            # 使用全局ai_name变量显示回复
+            print(f"{ai_name}: {ai_resp}")
+            self.chat_history.append({"role": "user", "content": user_msg})
+            self.chat_history.append({"role": "assistant", "content": ai_resp})
 
     # ===================== 新增：统一的info构造函数 =====================
-    def build_info_dict(self, parsed):
+    def build_info_dict(self):
         """
-        统一构造info字典
-        :param parsed: parse_mcp_request解析后的字典
+        统一构造info字典（直接使用全局变量rawmet和params）
         :return: 标准化的info字典
         """
         return {
-            "method": parsed["full_method"],  # 完整三级方法名
-            "params": parsed["params"]        # 请求参数
+            "method": rawmet,  # 全局变量：完整三级方法名
+            "params": params   # 全局变量：请求参数字典
         }
 
     # ===================== 新增：统一的响应处理函数 =====================
-    def handle_mcp_response(self, parsed, is_success=True, result=None, error_code=None, error_msg=None):
+    def handle_mcp_response(self, is_success=True, result=None, error_code=None, error_msg=None):
         """
-        统一处理MCP响应生成
-        :param parsed: parse_mcp_request解析后的字典
+        统一处理MCP响应生成（直接使用全局变量）
         :param is_success: 是否成功（True/False）
         :param result: 成功时的结果数据（dict）
         :param error_code: 失败时的错误码（int）
         :param error_msg: 失败时的错误信息（str）
         :return: 格式化的MCP响应字符串
         """
-        # 统一构造info字典
-        info = self.build_info_dict(parsed)
+        # 统一构造info字典（使用全局变量）
+        info = self.build_info_dict()
         
         # 根据成功/失败生成响应
         if is_success:
@@ -387,130 +532,65 @@ class Agent:
         # 生成最终响应字符串
         response_str = f";;{json.dumps(response, ensure_ascii=False, separators=(',', ':'))};;"
         
-        # 统一打印响应日志（根据logger模式）
+        # 统一打印响应日志（根据全局logger变量）
         self.log_mcp_response(response_str)
         
         return response_str
 
     def log_mcp_response(self, response_str):
-        """统一打印MCP响应日志"""
-        logger_mode = self.config.logger
-        if logger_mode in ["all", "format"]:
+        """统一打印MCP响应日志（使用全局logger变量）"""
+        if logger in ["all", "format"]:
             try:
                 json_str = response_str[2:-2]
                 json_data = json.loads(json_str)
-                if logger_mode == "all":
+                if logger == "all":
                     print(f"[日志] mcp返回:\n{json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))}")
-                elif logger_mode == "format":
+                elif logger == "format":
                     print(f"[日志] mcp返回:")
                     print(format_json_for_log(json_data, "  "))
             except:
                 print(f"[日志] mcp返回: {response_str}")
 
-    # ===================== 核心改造：统一MCP协议解析函数 =====================
-    def parse_mcp_protocol(self, mcp_json):
-        """
-        统一解析MCP协议请求，实现协议解析与业务处理解耦
-        负责：格式合法性校验、核心字段提取、三级method解析
-        :param mcp_json: 原始MCP请求JSON字典
-        :return: 标准化解析结果（dict），包含error则为解析失败
-        """
-        try:
-            # 1. 基础格式校验：必须包含mcp和method字段
-            if not isinstance(mcp_json, dict):
-                return {"error": "MCP请求必须是JSON对象", "error_code": 1000}
-            
-            if "mcp" not in mcp_json:
-                return {"error": "MCP请求缺少核心字段：mcp", "error_code": 1001}
-            
-            if mcp_json["mcp"] != "request":
-                return {"error": f"不支持的MCP类型：{mcp_json['mcp']}，仅支持request", "error_code": 1002}
-            
-            if "method" not in mcp_json:
-                return {"error": "MCP请求缺少核心字段：method", "error_code": 1003}
-            
-            full_method = mcp_json["method"]
-            if not isinstance(full_method, str) or not full_method.strip():
-                return {"error": "method字段必须是非空字符串", "error_code": 1004}
-            
-            # 2. 三级method解析（module.method.func）
-            method_parts = full_method.strip().split(".")
-            if len(method_parts) != 3:
-                return {"error": f"method必须是三级格式：module.method.func，当前：{full_method}", "error_code": 1005}
-            
-            module, method, func = method_parts
-            if not all([module.strip(), method.strip(), func.strip()]):
-                return {"error": "三级method的每一部分都不能为空", "error_code": 1006}
-            
-            # 3. 提取参数（params可选，默认空字典）
-            params = mcp_json.get("params", {})
-            if not isinstance(params, dict):
-                return {"error": "params字段必须是JSON对象", "error_code": 1007}
-            
-            # 4. 返回标准化解析结果（无error表示解析成功）
-            return {
-                "mcp_type": mcp_json["mcp"],       # MCP类型（固定为request）
-                "module": module,                 # 一级模块（如system/python）
-                "method": method,                 # 二级方法（如terminal/run）
-                "func": func,                     # 三级函数（如run/execute）
-                "full_method": full_method,       # 完整三级method
-                "params": params,                 # 标准化参数字典
-                "raw_request": mcp_json           # 保留原始请求（可选，用于日志/调试）
-            }
-        
-        except Exception as e:
-            return {"error": f"MCP协议解析异常：{str(e)}", "error_code": 9999}
-
-    # ===================== MCP协议处理方法（改造后） =====================
+    # ===================== 核心改造：MCP请求处理（仅调度，无解析） =====================
     def handle_mcp_request(self, mcp_json):
-        """处理MCP请求并返回响应（改造后：仅负责调度，不做解析）"""
-        logger_mode = self.config.logger
-        # lite模式下不打印MCP请求的原始日志
-        if logger_mode in ["all", "format"]:
-            if logger_mode == "all":
-                print(f"[日志] mcp请求:\n{json.dumps(mcp_json, ensure_ascii=False, separators=(',', ':'))}")
-            elif logger_mode == "format":
+        """处理MCP请求并返回响应（仅负责调度，解析由全局函数完成）"""
+        global req, module, method, func, params, rawmet
+        # 1. 调用全局解析函数解析MCP请求
+        parse_error = parse_mcp_protocol(mcp_json, self)
+        if parse_error:
+            # 解析失败：直接返回全局函数生成的错误响应
+            return parse_error
+        
+        # 2. 解析成功：打印MCP请求日志（使用全局logger变量）
+        if logger in ["all", "format"]:
+            if logger == "all":
+                print(f"[日志] mcp请求:\n{json.dumps(req, ensure_ascii=False, separators=(',', ':'))}")
+            elif logger == "format":
                 print(f"[日志] mcp请求:")
-                print(format_json_for_log(mcp_json, "  "))
+                print(format_json_for_log(req, "  "))
         
-        # 核心：调用统一解析层解析MCP协议
-        parsed = self.parse_mcp_protocol(mcp_json)
-        
-        # 解析失败：返回标准化错误响应
-        if "error" in parsed:
-            return self.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
-                is_success=False,
-                error_code=parsed.get("error_code", 1001),
-                error_msg=parsed["error"]
-            )
-        
-        # 解析成功：根据模块调度业务处理
-        module = parsed["module"]
+        # 3. 根据全局module变量调度业务处理（模块无需自行解析）
         if module == "system":
-            return self.handle_system_module(parsed)
+            return self.handle_system_module()
         elif module == "python":
-            return self.handle_python_module(parsed)
+            return self.handle_python_module()
         else:
             # 未知模块：返回标准化错误响应
             return self.handle_mcp_response(
-                parsed=parsed,
                 is_success=False,
                 error_code=1002,
                 error_msg=f"未知模块: {module}，仅支持system/python"
             )
     
-    def handle_system_module(self, parsed):
-        """处理system模块的MCP请求（改造后：仅接收统一解析后的标准化数据）"""
+    def handle_system_module(self):
+        """处理system模块的MCP请求（直接使用全局变量，无任何解析逻辑）"""
         try:
-            # 直接从统一解析结果中获取数据，无需再解析
-            full_method = parsed["full_method"]
-            params = parsed["params"]
+            # 直接使用全局变量：method/func/params/rawmet，无需解析
             result = {}
             
             # system模块支持的方法：terminal.run, time.get, info.get
-            if parsed["method"] == "terminal" and parsed["func"] == "run":
-                # 修改：只处理command键名，不再遍历所有key
+            if method == "terminal" and func == "run":
+                # 直接使用全局params字典，仅处理command键
                 if "command" in params:
                     cmd_value = params["command"]
                     if cmd_value.strip():
@@ -526,63 +606,47 @@ class Agent:
                 else:
                     # 没有command键的错误提示
                     result["error"] = "参数错误：必须提供'command'键来指定要执行的终端命令"
-                # 使用统一响应函数生成成功响应
-                return self.handle_mcp_response(
-                    parsed=parsed,
-                    is_success=True,
-                    result=result
-                )
+                # 返回成功响应（使用全局变量）
+                return self.handle_mcp_response(is_success=True, result=result)
             
-            elif parsed["method"] == "time" and parsed["func"] == "get":
+            elif method == "time" and func == "get":
                 time_type = list(params.values())[0] if params else ""
                 time_value = self.get_time_raw(time_type)
                 result = {"time": time_value}
-                # 使用统一响应函数生成成功响应
-                return self.handle_mcp_response(
-                    parsed=parsed,
-                    is_success=True,
-                    result=result
-                )
+                # 返回成功响应
+                return self.handle_mcp_response(is_success=True, result=result)
             
-            elif parsed["method"] == "info" and parsed["func"] == "get":
+            elif method == "info" and func == "get":
                 info_value = self.get_system_info_raw()
                 result = {"system_info": info_value}
-                # 使用统一响应函数生成成功响应
-                return self.handle_mcp_response(
-                    parsed=parsed,
-                    is_success=True,
-                    result=result
-                )
+                # 返回成功响应
+                return self.handle_mcp_response(is_success=True, result=result)
             
             else:
-                # 使用统一响应函数生成错误响应
+                # 未知的方法组合：返回错误响应
                 return self.handle_mcp_response(
-                    parsed=parsed,
                     is_success=False,
                     error_code=1003,
-                    error_msg=f"未知的方法组合: {full_method}，system模块仅支持 terminal.run / time.get / info.get"
+                    error_msg=f"未知的方法组合: {rawmet}，system模块仅支持 terminal.run / time.get / info.get"
                 )
         
         except Exception as e:
-            # 使用统一响应函数生成错误响应
+            # 执行异常：返回错误响应
             return self.handle_mcp_response(
-                parsed=parsed,
                 is_success=False,
                 error_code=1004,
                 error_msg=f"执行命令失败: {str(e)}"
             )
     
-    def handle_python_module(self, parsed):
-        """处理python模块的MCP请求（改造后：仅接收统一解析后的标准化数据）"""
+    def handle_python_module(self):
+        """处理python模块的MCP请求（直接使用全局变量，无任何解析逻辑）"""
         try:
-            # 直接从统一解析结果中获取数据，无需再解析
-            full_method = parsed["full_method"]
-            params = parsed["params"]
+            # 直接使用全局变量：method/func/params/rawmet，无需解析
             result = {}
             
             # Python模块只支持run.execute方法
-            if parsed["method"] == "run" and parsed["func"] == "execute":
-                # 遍历参数执行Python代码
+            if method == "run" and func == "execute":
+                # 直接遍历全局params字典执行Python代码
                 for param_key, param_value in params.items():
                     if param_key == "command":
                         # 单行Python命令
@@ -616,26 +680,20 @@ class Agent:
                         # 未知参数键
                         result[param_key] = f"错误: 不支持的参数键 '{param_key}'，仅支持 command/script"
                 
-                # 使用统一响应函数生成成功响应
-                return self.handle_mcp_response(
-                    parsed=parsed,
-                    is_success=True,
-                    result=result
-                )
+                # 返回成功响应
+                return self.handle_mcp_response(is_success=True, result=result)
             
             else:
-                # 使用统一响应函数生成错误响应
+                # 未知的方法组合：返回错误响应
                 return self.handle_mcp_response(
-                    parsed=parsed,
                     is_success=False,
                     error_code=2001,
-                    error_msg=f"Python模块未知的方法组合: {full_method}，仅支持 run.execute"
+                    error_msg=f"Python模块未知的方法组合: {rawmet}，仅支持 run.execute"
                 )
         
         except Exception as e:
-            # 使用统一响应函数生成错误响应
+            # 执行异常：返回错误响应
             return self.handle_mcp_response(
-                parsed=parsed,
                 is_success=False,
                 error_code=2002,
                 error_msg=f"执行Python代码失败: {str(e)}"
@@ -643,7 +701,7 @@ class Agent:
 
     # ===================== 命令执行方法 =====================
     def run_terminal_command(self, command):
-        """统一执行终端命令（移除powershell，仅保留通用shell）"""
+        """统一执行终端命令（移除powershell，仅保留通用shell，使用全局logger变量）"""
         try:
             original_command = command
             os_type = platform.system()
@@ -658,9 +716,8 @@ class Agent:
                 if not command.endswith("&"):
                     command = f"{command} &"
 
-            # 打印要执行的命令日志（根据logger模式判断）
-            logger_mode = self.config.logger
-            if logger_mode in ["all", "format", "lite"]:
+            # 打印要执行的命令日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
                 print(f"[system@terminal:run] 执行终端命令: {original_command}")
 
             # 执行命令（统一使用shell=True）
@@ -676,20 +733,20 @@ class Agent:
             output = result.stdout.strip()
             error = result.stderr.strip()
 
-            # 打印命令执行结果日志（根据logger模式展示不同格式）
-            if logger_mode in ["all", "format", "lite"]:
-                if logger_mode == "all":
+            # 打印命令执行结果日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
+                if logger == "all":
                     if output:
                         print(f"[system@terminal:run] 命令输出: {output}")
                     if error:
                         print(f"[system@terminal:run] 命令错误: {error}")
-                elif logger_mode == "format":
+                elif logger == "format":
                     print(f"[system@terminal:run] 终端命令执行结果:")
                     if output:
                         print(f"  输出: {output}")
                     if error:
                         print(f"  错误: {error}")
-                elif logger_mode == "lite":
+                elif logger == "lite":
                     # lite模式只显示简洁的执行结果
                     if error:
                         print(f"[system@terminal:run] 执行结果: 错误: {error}")
@@ -700,21 +757,19 @@ class Agent:
 
             return output, error
         except Exception as e:
-            # 异常信息根据logger模式显示
-            logger_mode = self.config.logger
-            if logger_mode in ["all", "format", "lite"]:
-                if logger_mode == "lite":
+            # 异常信息根据全局logger变量显示
+            if logger in ["all", "format", "lite"]:
+                if logger == "lite":
                     print(f"[system@terminal:run] 执行结果: 错误: {str(e)}")
                 else:
                     print(f"[system@terminal:run] 终端命令执行错误: {str(e)}")
             return "", str(e)
     
     def run_python_command(self, command):
-        """执行单行Python命令"""
+        """执行单行Python命令（使用全局logger变量）"""
         try:
-            # 打印Python命令执行日志（根据logger模式判断）
-            logger_mode = self.config.logger
-            if logger_mode in ["all", "format", "lite"]:
+            # 打印Python命令执行日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
                 print(f"[python@run:execute] 执行Python命令: {command}")
             
             # 捕获标准输出
@@ -738,14 +793,14 @@ class Agent:
                     exec(command)
                     final_result = output_buffer.getvalue().strip()
             
-            # 打印执行结果日志（根据logger模式展示不同格式）
-            if logger_mode in ["all", "format", "lite"]:
-                if logger_mode == "all":
+            # 打印执行结果日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
+                if logger == "all":
                     print(f"[python@run:execute] Python命令执行结果: {final_result if final_result else '无输出'}")
-                elif logger_mode == "format":
+                elif logger == "format":
                     print(f"[python@run:execute] Python命令执行结果:")
                     print(f"  输出: {final_result if final_result else '无输出'}")
-                elif logger_mode == "lite":
+                elif logger == "lite":
                     # lite模式只显示简洁的执行结果
                     print(f"[python@run:execute] 执行结果: {final_result if final_result else '执行成功（无输出）'}")
             
@@ -753,25 +808,23 @@ class Agent:
         
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
-            # 打印错误日志（根据logger模式显示）
-            logger_mode = self.config.logger
-            if logger_mode in ["all", "format", "lite"]:
-                if logger_mode == "lite":
+            # 打印错误日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
+                if logger == "lite":
                     print(f"[python@run:execute] 执行结果: 错误: {error_msg}")
                 else:
                     print(f"[python@run:execute] Python命令执行错误: {error_msg}")
             return None, error_msg
     
     def run_python_script(self, script_lines):
-        """执行多行Python脚本（从列表还原为脚本）"""
+        """执行多行Python脚本（从列表还原为脚本，使用全局logger变量）"""
         try:
             # 将列表还原为完整的Python脚本
             script = "\n".join(script_lines)
             
-            # 打印Python脚本执行日志（根据logger模式判断）
-            logger_mode = self.config.logger
-            if logger_mode in ["all", "format", "lite"]:
-                if logger_mode == "lite":
+            # 打印Python脚本执行日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
+                if logger == "lite":
                     print(f"[python@run:execute] 执行Python脚本（共{len(script_lines)}行）")
                 else:
                     print(f"[python@run:execute] 执行Python脚本:")
@@ -786,14 +839,14 @@ class Agent:
             
             final_result = output_buffer.getvalue().strip()
             
-            # 打印执行结果日志（根据logger模式展示不同格式）
-            if logger_mode in ["all", "format", "lite"]:
-                if logger_mode == "all":
+            # 打印执行结果日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
+                if logger == "all":
                     print(f"[python@run:execute] Python脚本执行结果: {final_result if final_result else '无输出'}")
-                elif logger_mode == "format":
+                elif logger == "format":
                     print(f"[python@run:execute] Python脚本执行结果:")
                     print(f"  输出: {final_result if final_result else '无输出'}")
-                elif logger_mode == "lite":
+                elif logger == "lite":
                     # lite模式只显示简洁的执行结果
                     print(f"[python@run:execute] 执行结果: {final_result if final_result else '执行成功（无输出）'}")
             
@@ -801,10 +854,9 @@ class Agent:
         
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
-            # 打印错误日志（根据logger模式显示）
-            logger_mode = self.config.logger
-            if logger_mode in ["all", "format", "lite"]:
-                if logger_mode == "lite":
+            # 打印错误日志（使用全局logger变量）
+            if logger in ["all", "format", "lite"]:
+                if logger == "lite":
                     print(f"[python@run:execute] 执行结果: 错误: {error_msg}")
                 else:
                     print(f"[python@run:execute] Python脚本执行错误: {error_msg}")
@@ -846,7 +898,7 @@ if __name__ == "__main__":
 ╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   
 """)
 
-    # 初始化Agent（自动校验并修复配置）
+    # 初始化Agent（自动校验并修复配置，同步到全局变量）
     app = Agent()
     
     print("✅ Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
@@ -865,11 +917,12 @@ if __name__ == "__main__":
     print()
     
     while True:
-        send_message = input(f"{app.config.user_name}: ")
-        if send_message.lower() == ';;exit':
+        # 使用全局user_name变量显示输入提示符
+        send_msg = input(f"{user_name}: ")
+        if send_msg.lower() == ';;exit':
             clear()
             break
-        elif send_message.strip() == ";;config":
+        elif send_msg.strip() == ";;config":
             clear()
             print("""
  ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -900,13 +953,19 @@ if __name__ == "__main__":
 ██╔╝     ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   
 ╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   
 """)
-                    print("✅ 已返回对话界面，配置修改需重启程序生效")
+                    print("✅ 已返回对话界面，配置修改已实时同步到全局！")
                     config_mode = False
                 elif config_input.lower() == 'watch':
-                    print("\n当前配置：")
-                    config_dict = app.config.model_dump()
-                    for key, value in config_dict.items():
-                        print(f"  {key}: {value}")
+                    print("\n当前全局配置：")
+                    # 直接打印全局变量，展示最新配置
+                    print(f"  api_url: {api_url}")
+                    print(f"  api_key: {api_key}")
+                    print(f"  model: {model}")
+                    print(f"  user_name: {user_name}")
+                    print(f"  ai_name: {ai_name}")
+                    print(f"  prompt: {prompt}")
+                    print(f"  send_history: {send_history}")
+                    print(f"  logger: {logger}")
                     print()
                 elif config_input.lower() == 'help':
                     # 显示config命令帮助
@@ -921,15 +980,14 @@ if __name__ == "__main__":
                     print("   用法：直接输入 cfghelp")
                     print()
                     print("3. watch")
-                    print("   作用：查看当前所有配置项的取值")
+                    print("   作用：查看当前所有全局配置项的取值")
                     print("   用法：直接输入 watch")
                     print()
                     print("4. set <配置项> <值>")
-                    print("   作用：设置指定配置项的值")
+                    print("   作用：设置指定配置项的值，实时同步到全局")
                     print("   用法示例：")
                     print("      set logger lite")
                     print("      set send_history True")
-                    print("      set api_key sk-xxxxxxxxxxxx")
                     print("      set prompt my_prompt.txt  # 设置prompt文件夹中的提示词文件")
                     print()
                     print("5. back")
@@ -942,41 +1000,41 @@ if __name__ == "__main__":
                     print("=" * 60)
                 elif config_input.lower() == 'cfghelp':
                     # 显示配置项详细说明（原help功能）
-                    print("\n📖 配置项详细说明：")
+                    print("\n📖 全局配置项详细说明：")
                     print("=" * 80)
                     config_help = {
                         "api_url": {
-                            "作用": "AI API的请求地址",
+                            "作用": "AI API的请求地址（全局变量）",
                             "类型": "字符串",
                             "默认值": "https://api.example.com/v1/chat/completions",
                             "示例": "https://api.openai.com/v1/chat/completions"
                         },
                         "api_key": {
-                            "作用": "AI API的认证密钥",
+                            "作用": "AI API的认证密钥（全局变量）",
                             "类型": "字符串",
                             "默认值": "your_api_key_here",
                             "示例": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
                         },
                         "model": {
-                            "作用": "使用的AI模型名称",
+                            "作用": "使用的AI模型名称（全局变量）",
                             "类型": "字符串",
                             "默认值": "default_model",
                             "示例": "gpt-3.5-turbo, gpt-4"
                         },
                         "user_name": {
-                            "作用": "对话时显示的用户名",
+                            "作用": "对话时显示的用户名（全局变量，输入提示符使用）",
                             "类型": "字符串",
                             "默认值": "用户",
                             "示例": "张三, User"
                         },
                         "ai_name": {
-                            "作用": "对话时显示的AI名称",
+                            "作用": "对话时显示的AI名称（全局变量，回复前缀使用）",
                             "类型": "字符串",
                             "默认值": "AI",
                             "示例": "助手, ChatGPT"
                         },
                         "prompt": {
-                            "作用": "prompt文件夹下的自定义提示词文件名（.txt格式）",
+                            "作用": "prompt文件夹下的自定义提示词文件名（全局变量）",
                             "类型": "字符串",
                             "默认值": "None",
                             "说明": """
@@ -985,13 +1043,13 @@ if __name__ == "__main__":
   - 示例：set prompt my_prompt.txt"""
                         },
                         "send_history": {
-                            "作用": "是否将当前会话历史发送给AI",
+                            "作用": "是否将当前会话历史发送给AI（全局变量）",
                             "类型": "布尔值",
                             "默认值": "False",
                             "合法值": "True/False"
                         },
                         "logger": {
-                            "作用": "日志输出模式",
+                            "作用": "日志输出模式（全局变量，所有日志逻辑使用）",
                             "类型": "字符串",
                             "默认值": "None",
                             "合法值": "all/format/lite/None",
@@ -1003,9 +1061,9 @@ if __name__ == "__main__":
                         }
                     }
                     
-                    # 格式化输出每个配置项的说明
+                    # 格式化输出每个全局配置项的说明
                     for key, info in config_help.items():
-                        print(f"\n🔧 {key}:")
+                        print(f"\n🔧 {key}（全局变量）:")
                         for attr, value in info.items():
                             if attr == "说明" and "\n" in value:
                                 print(f"   {attr}:{value}")
@@ -1022,14 +1080,14 @@ if __name__ == "__main__":
                             continue
                         
                         _, key, value = parts
-                        # 严格校验配置值合法性
+                        # 严格校验配置值合法性，更新实例后同步到全局
                         if key == "logger":
                             # 校验logger取值范围
                             valid_values = ["all", "format", "lite", "None"]
                             if value not in valid_values:
-                                print(f"❌ 错误：{key} 只能设置为 {', '.join(valid_values)}")
+                                print(f"❌ 错误：全局变量 {key} 只能设置为 {', '.join(valid_values)}")
                                 continue
-                            # 合法值：更新内存中的配置（保存到文件）
+                            # 合法值：更新实例配置，保存并同步到全局
                             setattr(app.config, key, value)
                             app.save_config()
                         
@@ -1039,30 +1097,31 @@ if __name__ == "__main__":
                             elif value.lower() == "false":
                                 valid_value = False
                             else:
-                                print(f"❌ 错误：{key} 只能设置为 True/False")
+                                print(f"❌ 错误：全局变量 {key} 只能设置为 True/False")
                                 continue
                             setattr(app.config, key, valid_value)
                             app.save_config()
                         
                         elif key in ["api_url", "api_key", "model", "user_name", "ai_name", "prompt"]:
-                            # 字符串类型直接保存
+                            # 字符串类型直接更新，保存并同步到全局
                             setattr(app.config, key, value)
                             app.save_config()
                         
                         else:
-                            print(f"❌ 未知的配置项: {key}")
-                            print(f"💡 输入 cfghelp 查看所有可用配置项")
+                            print(f"❌ 未知的全局配置项: {key}")
+                            print(f"💡 输入 cfghelp 查看所有可用全局配置项")
                             continue
                         
-                        print(f"✅ 配置项 '{key}' 已更新为: {getattr(app.config, key)}")
+                        # 打印全局变量的最新值
+                        print(f"✅ 全局配置项 '{key}' 已更新为: {globals()[key]}")
                     
                     except Exception as e:
-                        print(f"❌ 配置更新失败: {str(e)}")
+                        print(f"❌ 全局配置更新失败: {str(e)}")
                 elif config_input.lower() == 'exit':
                     clear()
                     sys.exit()
                 else:
                     print("❌ 未知命令！输入 help 查看所有可用命令")
         else:
-            user_message = send_message.strip()
-            app.send_message(user_message)
+            user_msg = send_msg.strip()
+            app.send_message(user_msg)
