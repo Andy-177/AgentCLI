@@ -1,0 +1,46 @@
+标准请求:
+请求:
+{"request":{"模块名":{"method":"方法.函数","params":{}}}}
+响应成功:
+{"response":{"info":{"模块名":{"method":"方法.函数","params":{}}},"result":{}}}
+响应失败:
+{"response":{"info":{"模块名":{"method":"方法.函数","params":{}}},"error":{"code":数字错误码,"message":"错误描述"}}}
+
+格式化:
+请求:
+{
+  "request": {
+    "模块名": {
+      "method": "方法.函数",
+      "params": {}
+    }
+  }
+}
+响应成功:
+{
+  "response": {
+    "info": {
+      "模块名": {
+        "method": "方法.函数",
+        "params": {}
+      }
+    },
+    "result": {}
+  }
+}
+响应失败:
+{
+  "response": {
+    "info": {
+      "模块名": {
+        "method": "方法.函数",
+        "params": {}
+      }
+    },
+    "error": {
+      "code": 数字错误码,
+      "message": "错误描述"
+    }
+  }
+}
+
