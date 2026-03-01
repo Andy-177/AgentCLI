@@ -14,6 +14,64 @@ A Super Agent
 # 帮助
 在`AGENT`界面使用;;exit命令退出AgentCLI，使用;;config命令打开配置界面
 # 更新日志
+## Beta-1.1.2.4
+- ## 更新
+  - 1.彻底重写MCP，改为自己发明的MRPC
+- ## 未来
+  - [ ] 添加对mcp模块的支持，允许添加自定义的mcp工具
+  - [ ] 将powershell做成mcp模块，让有需求的用户可以使用
+  - [ ] 为其制作TUI，使其类似opencode
+  - [ ] 对历史记录的持久化存储在未来以session的形式回归
+- ## 附件
+  - [JSON-MRPC](https://github.com/Andy-177/JSON-Modular-Remote-Procedure-Call)
+- ## JSON-MRPC-MCP协议
+```
+标准请求:
+请求:
+{"request":{"模块名":{"method":"方法.函数","params":{}}}}
+响应成功:
+{"response":{"info":{"模块名":{"method":"方法.函数","params":{}}},"result":{}}}
+响应失败:
+{"response":{"info":{"模块名":{"method":"方法.函数","params":{}}},"error":{"code":数字错误码,"message":"错误描述"}}}
+
+格式化:
+请求:
+{
+  "request": {
+    "模块名": {
+      "method": "方法.函数",
+      "params": {}
+    }
+  }
+}
+响应成功:
+{
+  "response": {
+    "info": {
+      "模块名": {
+        "method": "方法.函数",
+        "params": {}
+      }
+    },
+    "result": {}
+  }
+}
+响应失败:
+{
+  "response": {
+    "info": {
+      "模块名": {
+        "method": "方法.函数",
+        "params": {}
+      }
+    },
+    "error": {
+      "code": 数字错误码,
+      "message": "错误描述"
+    }
+  }
+}
+```
 ## Beta-1.1.2.3
 - ## 更新
   - 1.把解析后MCP对应的变量以及配置的变量全部改为了全局变量，为后面加入模块功能做铺垫
