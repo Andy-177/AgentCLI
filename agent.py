@@ -17,11 +17,11 @@ module = None    # 解析后的模块名（如system/python）
 method = None    # 解析后的方法名（如terminal/run）
 func = None      # 解析后的函数名（如run/execute）
 params = {}      # 解析后的参数字典（始终为dict，默认空）
-rawmet = None    # MCP请求里的完整method字段（三级格式：module.method.func）
+rawmet = None    # 解析后的完整方法函数字符串（如terminal.run）
 
 # ===================== 配置项全局变量（与Config模型字段一一对应）=====================
 # 所有配置值全局化，业务逻辑直接使用，由Agent统一维护同步
-api_url = "https://api.example.com/v1/chat/completions"
+api_url = "https://api.example.com/v1/chat/completions "
 api_key = "your_api_key_here"
 model = "default_model"
 user_name = "用户"
@@ -32,7 +32,7 @@ logger = "None"  # 可选值：all/format/lite/None
 
 # 定义配置模型
 class Config(BaseModel):
-    api_url: str = "https://api.example.com/v1/chat/completions"
+    api_url: str = "https://api.example.com/v1/chat/completions "
     api_key: str = "your_api_key_here"
     model: str = "default_model"
     user_name: str = "用户"
@@ -172,9 +172,9 @@ class Config(BaseModel):
 # ===================== 全局MCP统一解析函数 =====================
 def parse_mcp_protocol(mcp_json, agent):
     """
-    全局统一解析MCP协议请求，解析成功后赋值全局变量，失败则返回错误响应
-    负责：格式合法性校验、核心字段提取、三级method解析、全局变量赋值
-    :param mcp_json: 原始MCP请求JSON字典
+    全局统一解析新格式MCP协议请求，解析成功后赋值全局变量，失败则返回错误响应
+    负责：格式合法性校验、核心字段提取、方法函数解析、全局变量赋值
+    :param mcp_json: 原始MCP请求JSON字典（已去除外层;;）
     :param agent: Agent实例（用于生成错误响应）
     :return: 解析成功返回None，解析失败返回标准化MCP错误响应字符串
     """
@@ -188,85 +188,99 @@ def parse_mcp_protocol(mcp_json, agent):
     rawmet = None
 
     try:
-        # 1. 基础格式校验：必须包含mcp和method字段
+        # 1. 基础格式校验：必须包含request字段
         if not isinstance(mcp_json, dict):
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": "", "method": "", "params": {}},
                 is_success=False,
                 error_code=1000,
                 error_msg="MCP请求必须是JSON对象"
             )
         
-        if "mcp" not in mcp_json:
+        if "request" not in mcp_json:
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": "", "method": "", "params": {}},
                 is_success=False,
                 error_code=1001,
-                error_msg="MCP请求缺少核心字段：mcp"
+                error_msg="MCP请求缺少核心字段：request"
             )
         
-        if mcp_json["mcp"] != "request":
+        request_data = mcp_json["request"]
+        if not isinstance(request_data, dict) or len(request_data) != 1:
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": "", "method": "", "params": {}},
                 is_success=False,
                 error_code=1002,
-                error_msg=f"不支持的MCP类型：{mcp_json['mcp']}，仅支持request"
+                error_msg="request字段必须是包含且仅包含一个模块名的JSON对象"
             )
         
-        if "method" not in mcp_json:
+        # 2. 提取模块名
+        module = list(request_data.keys())[0]
+        module_data = request_data[module]
+        
+        # 3. 校验模块数据格式
+        if not isinstance(module_data, dict):
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": module, "method": "", "params": {}},
                 is_success=False,
                 error_code=1003,
-                error_msg="MCP请求缺少核心字段：method"
+                error_msg=f"模块 {module} 的数据必须是JSON对象"
             )
         
-        rawmet = mcp_json["method"]  # 完整三级method字段
-        if not isinstance(rawmet, str) or not rawmet.strip():
+        if "method" not in module_data:
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": module, "method": "", "params": {}},
                 is_success=False,
                 error_code=1004,
-                error_msg="method字段必须是非空字符串"
+                error_msg=f"模块 {module} 缺少method字段"
             )
         
-        # 2. 三级method解析（module.method.func）
-        method_parts = rawmet.strip().split(".")
-        if len(method_parts) != 3:
+        rawmet = module_data["method"]  # 完整方法函数字符串（如terminal.run）
+        if not isinstance(rawmet, str) or not rawmet.strip():
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": module, "method": "", "params": {}},
                 is_success=False,
                 error_code=1005,
-                error_msg=f"method必须是三级格式：module.method.func，当前：{rawmet}"
+                error_msg=f"模块 {module} 的method字段必须是非空字符串"
             )
         
-        module, method, func = method_parts
-        if not all([module.strip(), method.strip(), func.strip()]):
+        # 4. 解析method（方法.函数）
+        method_parts = rawmet.strip().split(".")
+        if len(method_parts) != 2:
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": module, "method": rawmet, "params": {}},
                 is_success=False,
                 error_code=1006,
-                error_msg="三级method的每一部分都不能为空"
+                error_msg=f"method必须是二级格式：方法.函数，当前：{rawmet}"
             )
         
-        # 3. 提取参数（params可选，默认空字典）
-        params = mcp_json.get("params", {})
-        if not isinstance(params, dict):
+        method, func = method_parts
+        if not all([method.strip(), func.strip()]):
             return agent.handle_mcp_response(
-                parsed={"full_method": "", "params": {}},
+                parsed={"module": module, "method": rawmet, "params": {}},
                 is_success=False,
                 error_code=1007,
-                error_msg="params字段必须是JSON对象"
+                error_msg="method的方法和函数部分都不能为空"
             )
         
-        # 4. 解析成功：赋值全局变量（req为原生请求）
+        # 5. 提取参数（params可选，默认空字典）
+        params = module_data.get("params", {})
+        if not isinstance(params, dict):
+            return agent.handle_mcp_response(
+                parsed={"module": module, "method": rawmet, "params": {}},
+                is_success=False,
+                error_code=1008,
+                error_msg=f"模块 {module} 的params字段必须是JSON对象"
+            )
+        
+        # 6. 解析成功：赋值全局变量（req为原生请求）
         req = mcp_json
         return None  # 无返回值表示解析成功
 
     except Exception as e:
         # 解析异常：返回标准化错误响应
         return agent.handle_mcp_response(
-            parsed={"full_method": "", "params": {}},
+            parsed={"module": "", "method": "", "params": {}},
             is_success=False,
             error_code=9999,
             error_msg=f"MCP协议解析异常：{str(e)}"
@@ -418,13 +432,13 @@ class Agent:
             system_content += f"\n当前系统类型是：{platform.system()}"
             system_content += "\n你只能使用MCP协议格式进行操作，格式如下："
             system_content += "\n1. 执行终端命令："
-            system_content += "\n;;{\"mcp\":\"request\",\"method\":\"system.terminal.run\",\"params\":{\"command\":\"echo hello\"}};;"
+            system_content += "\n;;{\"request\":{\"system\":{\"method\":\"terminal.run\",\"params\":{\"command\":\"echo hello\"}}}};;"
             system_content += "\n2. 执行Python代码："
-            system_content += "\n- 单行命令：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"command\":\"print('hello')\"}};;"
-            system_content += "\n- 多行脚本：;;{\"mcp\":\"request\",\"method\":\"python.run.execute\",\"params\":{\"script\":[\"print('hello')\",\"print('world')\",\"x=1+1\",\"print(x)\"]}};;"
-            system_content += "\n3. 获取时间：;;{\"mcp\":\"request\",\"method\":\"system.time.get\",\"params\":{\"type\":\"date | time | all | stamp\"}};;"
-            system_content += "\n4. 获取系统信息：;;{\"mcp\":\"request\",\"method\":\"system.info.get\",\"params\":{}};;"
-            system_content += "\n注意：收到MCP响应后，不需要再次生成MCP请求，直接用自然语言回复用户即可"
+            system_content += "\n- 单行命令：;;{\"request\":{\"python\":{\"method\":\"run.execute\",\"params\":{\"command\":\"print('hello')\"}}}};;"
+            system_content += "\n- 多行脚本：;;{\"request\":{\"python\":{\"method\":\"run.execute\",\"params\":{\"script\":[\"print('hello')\",\"print('world')\",\"x=1+1\",\"print(x)\"]}}}};;"
+            system_content += "\n3. 获取时间：;;{\"request\":{\"system\":{\"method\":\"time.get\",\"params\":{\"type\":\"date | time | all | stamp\"}}}};;"
+            system_content += "\n4. 获取系统信息：;;{\"request\":{\"system\":{\"method\":\"info.get\",\"params\":{}}}};;"
+            system_content += "\n注意：MCP请求必须用;;包裹，严格遵循上述格式，收到MCP响应后，直接用自然语言回复用户即可"
 
             # 加载prompt文件夹中的提示词文件（使用全局prompt变量）
             if prompt != "None":
@@ -464,6 +478,7 @@ class Agent:
 
     def handle_ai_response(self, ai_resp, user_msg):
         """处理AI响应"""
+        # 匹配;;包裹的MCP请求
         mcp_pattern = r";;({.*?});;"
         mcp_matches = re.findall(mcp_pattern, ai_resp, re.DOTALL)
         
@@ -471,11 +486,10 @@ class Agent:
             for mcp_str in mcp_matches:
                 try:
                     mcp_json = json.loads(mcp_str)
-                    if mcp_json.get("mcp") == "request":
-                        # 直接调用自身的MCP处理方法
-                        mcp_resp = self.handle_mcp_request(mcp_json)
-                        self.chat_history.append({"role": "assistant", "content": ai_resp})
-                        self.call_api(mcp_resp)
+                    # 直接调用自身的MCP处理方法
+                    mcp_resp = self.handle_mcp_request(mcp_json)
+                    self.chat_history.append({"role": "assistant", "content": ai_resp})
+                    self.call_api(mcp_resp)
                 except json.JSONDecodeError as e:
                     error_msg = f"MCP JSON解析错误: {str(e)}"
                     self.log_ai_message(error_msg)
@@ -491,45 +505,55 @@ class Agent:
     # ===================== 新增：统一的info构造函数 =====================
     def build_info_dict(self):
         """
-        统一构造info字典（直接使用全局变量rawmet和params）
+        统一构造info字典（符合新MCP格式）
         :return: 标准化的info字典
         """
+        global module, rawmet, params
         return {
-            "method": rawmet,  # 全局变量：完整三级方法名
-            "params": params   # 全局变量：请求参数字典
+            module: {
+                "method": rawmet,
+                "params": params
+            }
         }
 
     # ===================== 新增：统一的响应处理函数 =====================
-    def handle_mcp_response(self, is_success=True, result=None, error_code=None, error_msg=None):
+    def handle_mcp_response(self, parsed, is_success=True, result=None, error_code=None, error_msg=None):
         """
-        统一处理MCP响应生成（直接使用全局变量）
+        统一处理新格式MCP响应生成
+        :param parsed: 解析后的基础信息（module/method/params）
         :param is_success: 是否成功（True/False）
         :param result: 成功时的结果数据（dict）
         :param error_code: 失败时的错误码（int）
         :param error_msg: 失败时的错误信息（str）
-        :return: 格式化的MCP响应字符串
+        :return: 格式化的MCP响应字符串（包含;;包裹）
         """
-        # 统一构造info字典（使用全局变量）
-        info = self.build_info_dict()
+        # 构建响应基础结构
+        response = {"response": {}}
+        
+        # 构建info字典
+        if parsed.get("module"):
+            info = {
+                parsed["module"]: {
+                    "method": parsed["method"],
+                    "params": parsed["params"]
+                }
+            }
+        else:
+            # 使用全局变量构建info
+            info = self.build_info_dict()
+        
+        response["response"]["info"] = info
         
         # 根据成功/失败生成响应
         if is_success:
-            response = {
-                "mcp": "response",
-                "info": info,
-                "result": result or {}
-            }
+            response["response"]["result"] = result or {}
         else:
-            response = {
-                "mcp": "response",
-                "info": info,
-                "error": {
-                    "code": error_code or 9999,
-                    "message": error_msg or "未知错误"
-                }
+            response["response"]["error"] = {
+                "code": error_code or 9999,
+                "message": error_msg or "未知错误"
             }
         
-        # 生成最终响应字符串
+        # 生成最终响应字符串（用;;包裹）
         response_str = f";;{json.dumps(response, ensure_ascii=False, separators=(',', ':'))};;"
         
         # 统一打印响应日志（根据全局logger变量）
@@ -544,7 +568,7 @@ class Agent:
                 json_str = response_str[2:-2]
                 json_data = json.loads(json_str)
                 if logger == "all":
-                    print(f"[日志] mcp返回:\n{json.dumps(json_data, ensure_ascii=False, separators=(',', ':'))}")
+                    print(f"[日志] mcp返回:\n{json.dumps(json_data, ensure_ascii=False, indent=2)}")
                 elif logger == "format":
                     print(f"[日志] mcp返回:")
                     print(format_json_for_log(json_data, "  "))
@@ -553,7 +577,7 @@ class Agent:
 
     # ===================== 核心改造：MCP请求处理（仅调度，无解析） =====================
     def handle_mcp_request(self, mcp_json):
-        """处理MCP请求并返回响应（仅负责调度，解析由全局函数完成）"""
+        """处理新格式MCP请求并返回响应（仅负责调度，解析由全局函数完成）"""
         global req, module, method, func, params, rawmet
         # 1. 调用全局解析函数解析MCP请求
         parse_error = parse_mcp_protocol(mcp_json, self)
@@ -564,7 +588,7 @@ class Agent:
         # 2. 解析成功：打印MCP请求日志（使用全局logger变量）
         if logger in ["all", "format"]:
             if logger == "all":
-                print(f"[日志] mcp请求:\n{json.dumps(req, ensure_ascii=False, separators=(',', ':'))}")
+                print(f"[日志] mcp请求:\n{json.dumps(req, ensure_ascii=False, indent=2)}")
             elif logger == "format":
                 print(f"[日志] mcp请求:")
                 print(format_json_for_log(req, "  "))
@@ -577,6 +601,7 @@ class Agent:
         else:
             # 未知模块：返回标准化错误响应
             return self.handle_mcp_response(
+                parsed={"module": module, "method": rawmet, "params": params},
                 is_success=False,
                 error_code=1002,
                 error_msg=f"未知模块: {module}，仅支持system/python"
@@ -589,7 +614,7 @@ class Agent:
             result = {}
             
             # system模块支持的方法：terminal.run, time.get, info.get
-            if method == "terminal" and func == "run":
+            if rawmet == "terminal.run":
                 # 直接使用全局params字典，仅处理command键
                 if "command" in params:
                     cmd_value = params["command"]
@@ -607,32 +632,46 @@ class Agent:
                     # 没有command键的错误提示
                     result["error"] = "参数错误：必须提供'command'键来指定要执行的终端命令"
                 # 返回成功响应（使用全局变量）
-                return self.handle_mcp_response(is_success=True, result=result)
+                return self.handle_mcp_response(
+                    parsed={"module": module, "method": rawmet, "params": params},
+                    is_success=True, 
+                    result=result
+                )
             
-            elif method == "time" and func == "get":
-                time_type = list(params.values())[0] if params else ""
+            elif rawmet == "time.get":
+                time_type = params.get("type", "")
                 time_value = self.get_time_raw(time_type)
                 result = {"time": time_value}
                 # 返回成功响应
-                return self.handle_mcp_response(is_success=True, result=result)
+                return self.handle_mcp_response(
+                    parsed={"module": module, "method": rawmet, "params": params},
+                    is_success=True, 
+                    result=result
+                )
             
-            elif method == "info" and func == "get":
+            elif rawmet == "info.get":
                 info_value = self.get_system_info_raw()
                 result = {"system_info": info_value}
                 # 返回成功响应
-                return self.handle_mcp_response(is_success=True, result=result)
+                return self.handle_mcp_response(
+                    parsed={"module": module, "method": rawmet, "params": params},
+                    is_success=True, 
+                    result=result
+                )
             
             else:
                 # 未知的方法组合：返回错误响应
                 return self.handle_mcp_response(
+                    parsed={"module": module, "method": rawmet, "params": params},
                     is_success=False,
                     error_code=1003,
-                    error_msg=f"未知的方法组合: {rawmet}，system模块仅支持 terminal.run / time.get / info.get"
+                    error_msg=f"未知的方法: {rawmet}，system模块仅支持 terminal.run / time.get / info.get"
                 )
         
         except Exception as e:
             # 执行异常：返回错误响应
             return self.handle_mcp_response(
+                parsed={"module": module, "method": rawmet, "params": params},
                 is_success=False,
                 error_code=1004,
                 error_msg=f"执行命令失败: {str(e)}"
@@ -645,7 +684,7 @@ class Agent:
             result = {}
             
             # Python模块只支持run.execute方法
-            if method == "run" and func == "execute":
+            if rawmet == "run.execute":
                 # 直接遍历全局params字典执行Python代码
                 for param_key, param_value in params.items():
                     if param_key == "command":
@@ -681,19 +720,25 @@ class Agent:
                         result[param_key] = f"错误: 不支持的参数键 '{param_key}'，仅支持 command/script"
                 
                 # 返回成功响应
-                return self.handle_mcp_response(is_success=True, result=result)
+                return self.handle_mcp_response(
+                    parsed={"module": module, "method": rawmet, "params": params},
+                    is_success=True, 
+                    result=result
+                )
             
             else:
                 # 未知的方法组合：返回错误响应
                 return self.handle_mcp_response(
+                    parsed={"module": module, "method": rawmet, "params": params},
                     is_success=False,
                     error_code=2001,
-                    error_msg=f"Python模块未知的方法组合: {rawmet}，仅支持 run.execute"
+                    error_msg=f"Python模块未知的方法: {rawmet}，仅支持 run.execute"
                 )
         
         except Exception as e:
             # 执行异常：返回错误响应
             return self.handle_mcp_response(
+                parsed={"module": module, "method": rawmet, "params": params},
                 is_success=False,
                 error_code=2002,
                 error_msg=f"执行Python代码失败: {str(e)}"
@@ -902,12 +947,12 @@ if __name__ == "__main__":
     app = Agent()
     
     print("✅ Agent 已启动，输入消息开始对话，输入 ';;exit' 退出。")
-    print("📚 支持的MCP操作（三级method格式）：")
-    print("   - 终端命令：system.terminal.run（参数：command）")
-    print("   - Python单行命令：python.run.execute (command参数)")
-    print("   - Python多行脚本：python.run.execute (script参数，列表形式)")
-    print("   - 时间查询：system.time.get")
-    print("   - 系统信息：system.info.get")
+    print("📚 支持的MCP操作（新格式）：")
+    print("   - 终端命令：;;{\"request\":{\"system\":{\"method\":\"terminal.run\",\"params\":{\"command\":\"命令内容\"}}}};;")
+    print("   - Python单行命令：;;{\"request\":{\"python\":{\"method\":\"run.execute\",\"params\":{\"command\":\"print('hello')\"}}}};;")
+    print("   - Python多行脚本：;;{\"request\":{\"python\":{\"method\":\"run.execute\",\"params\":{\"script\":[\"行1\",\"行2\"]}}}};;")
+    print("   - 时间查询：;;{\"request\":{\"system\":{\"method\":\"time.get\",\"params\":{\"type\":\"date|time|all|stamp\"}}}};;")
+    print("   - 系统信息：;;{\"request\":{\"system\":{\"method\":\"info.get\",\"params\":{}}}};;")
     print("⚙️  日志模式说明：")
     print("   - all: 显示所有日志（MCP请求/响应+模块执行日志）")
     print("   - format: 格式化显示所有日志")
@@ -1006,8 +1051,8 @@ if __name__ == "__main__":
                         "api_url": {
                             "作用": "AI API的请求地址（全局变量）",
                             "类型": "字符串",
-                            "默认值": "https://api.example.com/v1/chat/completions",
-                            "示例": "https://api.openai.com/v1/chat/completions"
+                            "默认值": "https://api.example.com/v1/chat/completions ",
+                            "示例": "https://api.openai.com/v1/chat/completions "
                         },
                         "api_key": {
                             "作用": "AI API的认证密钥（全局变量）",
